@@ -74,9 +74,15 @@ class Nv21Decoder(private val context: Context) {
 
     private fun loadImage(path: String): Boolean {
         return try {
-            val stream = context.contentResolver.openInputStream(HookConfig.mediaUri(path))
-                ?: return false
-            val bitmap = stream.use { BitmapFactory.decodeStream(it) } ?: return false
+            val uri = HookConfig.mediaUri(path)
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            context.contentResolver.openInputStream(uri)?.use {
+                BitmapFactory.decodeStream(it, null, bounds)
+            }
+            val sample = maxOf(1, ceilMax(bounds.outWidth, bounds.outHeight, MAX_IMAGE_DIMENSION))
+            val options = BitmapFactory.Options().apply { inSampleSize = sample }
+            val stream = context.contentResolver.openInputStream(uri) ?: return false
+            val bitmap = stream.use { BitmapFactory.decodeStream(it, null, options) } ?: return false
             val w = bitmap.width
             val h = bitmap.height
             if (w <= 0 || h <= 0) {
@@ -225,6 +231,12 @@ class Nv21Decoder(private val context: Context) {
         return out
     }
 
+    private fun ceilMax(width: Int, height: Int, limit: Int): Int {
+        val largest = maxOf(width, height)
+        if (largest <= limit) return 1
+        return (largest + limit - 1) / limit
+    }
+
     fun release() {
         running.set(false)
         thread?.interrupt()
@@ -359,5 +371,9 @@ class Nv21Decoder(private val context: Context) {
     fun updateConfig(config: JSONObject?) {
         playing = config?.optBoolean("playing", true) ?: true
         speed = (config?.optDouble("speed", 1.0) ?: 1.0).toFloat().coerceIn(0.25f, 4f)
+    }
+
+    companion object {
+        private const val MAX_IMAGE_DIMENSION = 2048
     }
 }

@@ -20,6 +20,12 @@ and it contains **no login, licensing, or subscription code**.
 - Camera1: preview callback NV21 injection, preview surface replacement, photo capture replacement
 - Camera2: session output redirection + GL preview rendering, JPEG still-image replacement,
   `SessionConfiguration` support
+- Surface-size tracking for `SurfaceTexture`, `SurfaceView`, `MediaCodec` and `MediaRecorder`
+  outputs, so replacement streams use the dimensions the target app expects instead of a 1x1
+  dummy texture
+- Memory-bounded image decoding for camera apps with small graphics budgets
+- Throttled Xposed diagnostics for module load, config delivery, surface replacement and renderer
+  startup
 - Exported `ContentProvider` used by hooks to read the shared config and media
 
 ## Build
@@ -54,8 +60,9 @@ LSPosed/Vector at runtime, so no Xposed classes are packaged into the APK.
 
 1. Install the APK on a rooted device running Android 9+ (API 28+).
 2. Open OpenVCam. Allow notifications if asked. Tap **Fix root** if root is not detected.
-3. Tap **Open LSPosed scope** (or Vector), enable the **OpenVCam** module, and select the app
-   whose camera should be replaced. Scope changes require force-stopping that app.
+3. Tap **Open LSPosed scope** (or **Open Vector scope**). On Vector this opens OpenVCam's scope
+   editor directly; enable the module and select the app whose camera should be replaced. Scope
+   changes require force-stopping that app.
 4. Pick an image or video, adjust crop/rotation/mirror/zoom, then tap **Enable hook**.
 5. Force-stop and reopen the app you scoped. Use **Disable hook** to return to the real camera.
 

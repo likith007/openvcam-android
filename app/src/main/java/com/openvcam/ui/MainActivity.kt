@@ -136,7 +136,7 @@ private data class FrameworkEntry(val packages: List<String>, val label: String)
 private val frameworks = listOf(
     FrameworkEntry(listOf("org.lsposed.manager", "com.lsposed.manager"), "LSPosed"),
     FrameworkEntry(listOf("org.lsposed.lspatch", "com.lsposed.lspatch"), "LSPatch"),
-    FrameworkEntry(listOf("com.vector.manager", "org.vector.manager"), "Vector"),
+    FrameworkEntry(listOf("org.matrix.vector.manager"), "Vector"),
     FrameworkEntry(listOf("de.robv.android.xposed.installer"), "Xposed"),
     FrameworkEntry(listOf("org.meowcat.edxposed.manager"), "EdXposed"),
     FrameworkEntry(listOf("com.topjohnwu.magisk"), "Magisk"),
@@ -194,7 +194,14 @@ private fun detectFramework(context: Context): String {
 private fun frameworkIntent(context: Context): Intent? {
     frameworks.forEach { entry ->
         entry.packages.firstOrNull { packageInstalled(context, it) }?.let { pkg ->
-            context.packageManager.getLaunchIntentForPackage(pkg)?.let { return it }
+            context.packageManager.getLaunchIntentForPackage(pkg)?.let { intent ->
+                // Vector accepts module://<package>:<user> and opens that module's
+                // scope editor directly. Other frameworks keep their normal launch intent.
+                if (pkg == "org.matrix.vector.manager") {
+                    intent.data = Uri.parse("module://${context.packageName}:0")
+                }
+                return intent
+            }
         }
     }
     return null

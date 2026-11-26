@@ -64,7 +64,10 @@ class GLPreviewRenderer(private val context: Context, private val surface: Surfa
     )
 
     fun start(source: JSONObject?, config: JSONObject?) {
-        val path = HookConfig.pathOf(source) ?: return
+        val path = HookConfig.pathOf(source) ?: run {
+            HookLog.once("render.no-source", "renderer has no media source")
+            return
+        }
         val type = HookConfig.typeOf(source)
         if (type != "video" && type != "image") return
         val key = "$type|$path"
@@ -158,7 +161,8 @@ class GLPreviewRenderer(private val context: Context, private val surface: Surfa
                 EGL14.eglSwapBuffers(display, eglSurface)
                 synchronized(frameLock) { frameAvailable = false }
             }
-        } catch (_: Throwable) {
+        } catch (t: Throwable) {
+            HookLog.once("render.fail", "renderer stopped: ${t.javaClass.simpleName}: ${t.message}")
         } finally {
             running.set(false)
             cleanupGl()
@@ -267,8 +271,18 @@ class GLPreviewRenderer(private val context: Context, private val surface: Surfa
             if (playing) mp.start() else mp.pause()
             player = mp
         } else {
-            val stream = context.contentResolver.openInputStream(HookConfig.mediaUri(path)) ?: return
-            val bitmap: Bitmap? = BitmapFactory.decodeStream(stream)
+            val uri = HookConfig.mediaUri(path)
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            context.contentResolver.openInputStream(uri)?.use {
+                BitmapFactory.decodeStream(it, null, bounds)
+            }
+            val largest = maxOf(bounds.outWidth, bounds.outHeight)
+            val sample = if (largest > MAX_IMAGE_DIMENSION) {
+                (largest + MAX_IMAGE_DIMENSION - 1) / MAX_IMAGE_DIMENSION
+            } else 1
+            val options = BitmapFactory.Options().apply { inSampleSize = sample }
+            val stream = context.contentResolver.openInputStream(uri) ?: return
+            val bitmap: Bitmap? = BitmapFactory.decodeStream(stream, null, options)
             stream.close()
             if (bitmap != null) {
                 sourceWidth = bitmap.width
@@ -370,6 +384,7 @@ class GLPreviewRenderer(private val context: Context, private val surface: Surfa
     }
 
     companion object {
+        private const val MAX_IMAGE_DIMENSION = 2048
         private const val VERTEX_SHADER = """
             attribute vec2 aPosition;
             attribute vec2 aTexCoord;

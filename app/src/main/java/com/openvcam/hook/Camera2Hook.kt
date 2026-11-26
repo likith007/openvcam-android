@@ -55,6 +55,11 @@ object Camera2Hook {
             fallback.setDefaultBufferSize(1, 1)
             fallback.setOnFrameAvailableListener { runCatching { it.updateTexImage() } }
         }
+        val size = SurfaceSizeTracker.applyTo(texture, original)
+        HookLog.once(
+            "c2.dummy",
+            "Camera2 dummy surface ${size.width}x${size.height} for ${original.javaClass.simpleName}"
+        )
         val dummy = Dummy(original, Surface(texture), texture, drainer)
         dummyByOriginal[original] = dummy
         originalByDummy[dummy.surface] = original
@@ -167,6 +172,7 @@ object Camera2Hook {
                     val renderer = GLPreviewRenderer(context, dummy.original)
                     renderer.start(source, cfg)
                     state.renderers.add(renderer)
+                    HookLog.once("c2.renderer", "Camera2 renderer started on ${dummy.original.javaClass.simpleName}")
                 }
             }
             state.renderers.forEach { renderer ->
@@ -282,6 +288,7 @@ object Camera2Hook {
                     else -> return
                 }
                 param.args[index] = replaced
+                HookLog.once("c2.session", "Camera2 session outputs replaced (${param.method.name})")
             }
 
             override fun afterHookedMethod(param: MethodHookParam) {

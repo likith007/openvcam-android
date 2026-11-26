@@ -2,6 +2,7 @@ package com.openvcam.hook
 
 import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.callbacks.XC_MethodHook
+import java.lang.reflect.Constructor
 import java.lang.reflect.Method
 
 object HookUtils {
@@ -30,6 +31,19 @@ object HookUtils {
         if (method == null) return
         try {
             XposedBridge.hookMethod(method, callback)
+        } catch (t: Throwable) {
+            XposedBridge.log("[OpenVCam] hook failed $tag: ${t.message}")
+        }
+    }
+
+    fun hook(
+        constructor: Constructor<*>?,
+        callback: XC_MethodHook,
+        tag: String
+    ) {
+        if (constructor == null) return
+        try {
+            XposedBridge.hookMethod(constructor, callback)
         } catch (t: Throwable) {
             XposedBridge.log("[OpenVCam] hook failed $tag: ${t.message}")
         }

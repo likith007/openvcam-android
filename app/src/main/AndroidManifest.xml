@@ -8,6 +8,21 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <queries>
+        <package android:name="org.lsposed.manager" />
+        <package android:name="com.lsposed.manager" />
+        <package android:name="org.lsposed.lspatch" />
+        <package android:name="com.lsposed.lspatch" />
+        <package android:name="org.matrix.vector.manager" />
+        <package android:name="de.robv.android.xposed.installer" />
+        <package android:name="org.meowcat.edxposed.manager" />
+        <package android:name="com.topjohnwu.magisk" />
+        <package android:name="me.weishu.kernelsu" />
+        <package android:name="com.kernelsu.manager" />
+        <package android:name="com.apatch.app" />
+        <package android:name="com.apatch.manager" />
+    </queries>
+
     <application
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"

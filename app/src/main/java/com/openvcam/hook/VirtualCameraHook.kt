@@ -36,8 +36,13 @@ class VirtualCameraHook : IXposedHookLoadPackage {
         synchronized(installed) {
             if (!installed.add(loader)) return
         }
+        runCatching { SurfaceSizeTracker.install(loader) }
+            .onFailure { HookLog.error("surface-size-tracker", it) }
         runCatching { Camera1Hook.install(loader) }
+            .onFailure { HookLog.error("camera1", it) }
         runCatching { Camera2Hook.install(loader) }
+            .onFailure { HookLog.error("camera2", it) }
+        HookLog.once("installed.$loader", "hooks installed in ${loader.javaClass.name}")
     }
 
     companion object {

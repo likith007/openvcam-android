@@ -185,7 +185,10 @@ object Camera1Hook {
             scheduleRendererRetry(s)
             return
         }
-        if (s.renderer == null) s.renderer = GLPreviewRenderer(s.context, target)
+        if (s.renderer == null) {
+            s.renderer = GLPreviewRenderer(s.context, target)
+            HookLog.once("c1.renderer", "Camera1 renderer started on ${target.javaClass.simpleName}")
+        }
         s.renderer?.start(source, cfg)
         s.renderer?.updateConfig(source, cfg)
     }
@@ -356,6 +359,8 @@ object Camera1Hook {
                         fallback.setDefaultBufferSize(1, 1)
                         fallback.setOnFrameAvailableListener { st -> runCatching { st.updateTexImage() } }
                     }
+                    val size = SurfaceSizeTracker.applyTo(dummy, original)
+                    HookLog.once("c1.texture", "Camera1 dummy texture ${size.width}x${size.height}")
                     s.dummyTextureDrainer = drainer
                     s.dummyTexture = dummy
                     textureStates[original] = s
@@ -402,6 +407,8 @@ object Camera1Hook {
                                 runCatching { source.updateTexImage() }
                             }
                         }
+                        val size = SurfaceSizeTracker.applyTo(st, holder)
+                        HookLog.once("c1.display", "Camera1 dummy surface ${size.width}x${size.height}")
                         s.dummySurfaceDrainer = drainer
                         s.dummySurfaceTexture = st
                         st

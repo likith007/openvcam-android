@@ -30,8 +30,13 @@ object HookConfig {
         try {
             val bundle = ctx.contentResolver.call(ROOT_URI, "getConfig", null, null)
             val json = bundle?.getString("json")
-            if (!json.isNullOrEmpty()) cached = JSONObject(json)
-        } catch (_: Throwable) {
+            if (!json.isNullOrEmpty()) {
+                cached = JSONObject(json)
+            } else {
+                HookLog.once("config.empty", "empty config from provider in ${ctx.packageName}")
+            }
+        } catch (t: Throwable) {
+            HookLog.once("config.fail", "config provider call failed in ${ctx.packageName}: ${t.message}")
         }
 
         if (now - lastHeartbeat > 10_000L) {
