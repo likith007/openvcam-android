@@ -8,7 +8,8 @@ and it contains **no login, licensing, or subscription code**.
 
 ## Features
 
-- **Simple single-screen UI** — everything on one scrollable page
+- **Clean minimal UI** — a single scrollable page with a gradient status banner, icon banners,
+  Material 3 icons, rounded cards, and smooth animated sections
 - **Environment status** — root access, installed hooking framework, active hook integration,
   and the number of selected scopes at a glance
 - **Target apps** — searchable, selectable list of installed apps whose camera should be hooked
