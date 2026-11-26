@@ -1,8 +1,6 @@
 package com.openvcam.ui
 
 import android.content.Context
-import android.content.Intent
-import android.content.pm.PackageManager
 import android.net.Uri
 import android.provider.OpenableColumns
 import com.openvcam.core.ConfigStore
@@ -39,14 +37,20 @@ object UiUtils {
 
     fun installedApps(context: Context): List<AppEntry> {
         val pm = context.packageManager
-        val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-        val resolved = pm.queryIntentActivities(intent, PackageManager.MATCH_ALL)
-        return resolved
-            .mapNotNull { info ->
-                val label = info.loadLabel(pm)?.toString() ?: return@mapNotNull null
-                AppEntry(label, info.activityInfo.packageName)
-            }
-            .distinctBy { it.packageName }
-            .sortedBy { it.label.lowercase() }
+        return try {
+            pm.getInstalledPackages(0)
+                .mapNotNull { info ->
+                    val pkg = info.packageName ?: return@mapNotNull null
+                    if (pkg == context.packageName || pkg == "android") return@mapNotNull null
+                    val appInfo = info.applicationInfo ?: return@mapNotNull null
+                    val label = pm.getApplicationLabel(appInfo)?.toString()?.takeIf { it.isNotBlank() }
+                        ?: pkg.substringAfterLast('.')
+                    AppEntry(label, pkg)
+                }
+                .distinctBy { it.packageName }
+                .sortedBy { it.label.lowercase() }
+        } catch (_: Throwable) {
+            emptyList()
+        }
     }
 }

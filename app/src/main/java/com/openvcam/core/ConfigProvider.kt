@@ -5,6 +5,7 @@ import android.content.ContentValues
 import android.content.res.AssetFileDescriptor
 import android.database.Cursor
 import android.net.Uri
+import android.os.Binder
 import android.os.Bundle
 import android.os.ParcelFileDescriptor
 
@@ -12,7 +13,22 @@ class ConfigProvider : ContentProvider() {
 
     override fun onCreate(): Boolean = true
 
+    /** Only OpenVCam itself or a package the user explicitly scoped may read config/media. */
+    private fun isTrustedCaller(): Boolean {
+        val ctx = context ?: return false
+        if (Binder.getCallingUid() == ctx.applicationInfo.uid) return true
+        val targets = ConfigStore.get(ctx).config.targets
+        val pkg = callingPackage
+        if (pkg != null && pkg in targets) return true
+        val uid = Binder.getCallingUid()
+        return targets.any { target ->
+            runCatching { ctx.packageManager.getApplicationInfo(target, 0).uid == uid }
+                .getOrDefault(false)
+        }
+    }
+
     override fun call(method: String, arg: String?, extras: Bundle?): Bundle? {
+        if (!isTrustedCaller()) return Bundle()
         val store = ConfigStore.get(context ?: return null)
         return Bundle().apply {
             when (method) {
@@ -28,14 +44,18 @@ class ConfigProvider : ContentProvider() {
                     putString("json", store.snapshotJson())
                 }
                 "applyControl" -> {
-                    val action = extras?.getString("action") ?: ""
-                    putString("json", store.applyControl(action, extras?.get("value")))
+                    // Settings may only be changed from OpenVCam itself.
+                    if (Binder.getCallingUid() == context?.applicationInfo?.uid) {
+                        val action = extras?.getString("action") ?: ""
+                        putString("json", store.applyControl(action, extras?.get("value")))
+                    }
                 }
             }
         }
     }
 
     override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor? {
+        if (!isTrustedCaller()) return null
         val name = uri.lastPathSegment ?: return null
         if (name.contains("..") || name.contains("/")) return null
         val file = ConfigStore.get(context ?: return null).mediaFile(name)

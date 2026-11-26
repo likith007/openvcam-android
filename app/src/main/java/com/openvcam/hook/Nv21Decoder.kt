@@ -26,78 +26,117 @@ class Nv21Decoder(private val context: Context) {
     @Volatile private var thread: Thread? = null
     private val running = AtomicBoolean(false)
 
-    @Volatile private var rawFrame: ByteArray? = null
-    @Volatile private var rawWidth = 0
-    @Volatile private var rawHeight = 0
+    private data class Frame(val bytes: ByteArray, val width: Int, val height: Int)
+
+    @Volatile private var frame: Frame? = null
+    @Volatile private var frameVersion = 0L
 
     @Volatile var rotation: Int = 0
     @Volatile var mirror: Boolean = false
     @Volatile var zoom: Float = 1f
     @Volatile var crop: String = "full"
     @Volatile var playing: Boolean = true
+    @Volatile var speed: Float = 1f
 
     @Volatile private var currentKey: String? = null
+    @Volatile private var failedKey: String? = null
+    @Volatile private var failedAt = 0L
+    @Volatile private var lastTransformKey: String? = null
+    @Volatile private var lastTransform: ByteArray? = null
+    private val transformLock = Any()
 
     fun configure(source: JSONObject?, config: JSONObject?) {
         val path = HookConfig.pathOf(source) ?: return release()
         val type = HookConfig.typeOf(source)
         rotation = source?.optInt("rotation", 0) ?: 0
-        mirror = source?.optBoolean("mirror", false) ?: true
+        mirror = source?.optBoolean("mirror", false) ?: false
         zoom = (source?.optDouble("zoom", 1.0) ?: 1.0).toFloat().coerceIn(0.5f, 3f)
         crop = source?.optString("crop", "full") ?: "full"
         playing = config?.optBoolean("playing", true) ?: true
+        speed = (config?.optDouble("speed", 1.0) ?: 1.0).toFloat().coerceIn(0.25f, 4f)
 
-        val key = "$type|$path|$rotation|$mirror|$zoom|$crop"
-        if (key == currentKey && running.get()) return
+        // Only the media identity needs a decoder restart. Rotation, mirror, crop and zoom
+        // are applied in frame(), so calling configure on every preview frame is cheap.
+        val key = "$type|$path"
+        if (key == currentKey) return
+        if (key == failedKey && System.currentTimeMillis() - failedAt < 1_000L) return
         release()
-        currentKey = key
 
-        if (type == "image") {
-            loadImage(path)
+        val loaded = if (type == "image") loadImage(path) else startVideo(path)
+        if (loaded) {
+            currentKey = key
+            failedKey = null
         } else {
-            startVideo(path)
+            failedKey = key
+            failedAt = System.currentTimeMillis()
         }
     }
 
-    private fun loadImage(path: String) {
-        try {
-            val stream = context.contentResolver.openInputStream(HookConfig.mediaUri(path)) ?: return
-            val bitmap = BitmapFactory.decodeStream(stream)
-            stream.close()
-            if (bitmap == null) return
-            rawWidth = bitmap.width
-            rawHeight = bitmap.height
-            val argb = IntArray(rawWidth * rawHeight)
-            bitmap.getPixels(argb, 0, rawWidth, 0, 0, rawWidth, rawHeight)
-            rawFrame = argbToNv21(argb, rawWidth, rawHeight)
+    private fun loadImage(path: String): Boolean {
+        return try {
+            val stream = context.contentResolver.openInputStream(HookConfig.mediaUri(path))
+                ?: return false
+            val bitmap = stream.use { BitmapFactory.decodeStream(it) } ?: return false
+            val w = bitmap.width
+            val h = bitmap.height
+            if (w <= 0 || h <= 0) {
+                bitmap.recycle()
+                return false
+            }
+            val argb = IntArray(w * h)
+            bitmap.getPixels(argb, 0, w, 0, 0, w, h)
+            publish(argbToNv21(argb, w, h), w, h)
             bitmap.recycle()
+            true
         } catch (_: Throwable) {
+            false
         }
     }
 
-    private fun startVideo(path: String) {
-        try {
-            val uri = HookConfig.mediaUri(path)
-            val descriptor = context.contentResolver.openAssetFileDescriptor(uri, "r") ?: return
-            afd = descriptor
-            val ex = MediaExtractor()
-            ex.setDataSource(descriptor.fileDescriptor, descriptor.startOffset, descriptor.length)
-            val track = (0 until ex.trackCount).firstOrNull {
-                ex.getTrackFormat(it).getString(MediaFormat.KEY_MIME)?.startsWith("video/") == true
-            } ?: return
-            ex.selectTrack(track)
-            val format = ex.getTrackFormat(track)
-            val mime = format.getString(MediaFormat.KEY_MIME) ?: return
+    private fun startVideo(path: String): Boolean {
+        var descriptor: android.content.res.AssetFileDescriptor? = null
+        var ex: MediaExtractor? = null
+        var decoder: MediaCodec? = null
+        return try {
+            descriptor = context.contentResolver.openAssetFileDescriptor(
+                HookConfig.mediaUri(path), "r"
+            ) ?: return false
+            val extractor = MediaExtractor()
+            ex = extractor
+            extractor.setDataSource(
+                descriptor.fileDescriptor, descriptor.startOffset, descriptor.length
+            )
+            val track = (0 until extractor.trackCount).firstOrNull {
+                extractor.getTrackFormat(it).getString(MediaFormat.KEY_MIME)?.startsWith("video/") == true
+            } ?: return false
+            extractor.selectTrack(track)
+            val format = extractor.getTrackFormat(track)
+            val mime = format.getString(MediaFormat.KEY_MIME) ?: return false
             val codec = MediaCodec.createDecoderByType(mime)
+            decoder = codec
             codec.configure(format, null, null, 0)
             codec.start()
-            this.extractor = ex
-            this.codec = codec
 
+            afd = descriptor
+            this.extractor = extractor
+            this.codec = codec
             running.set(true)
-            thread = Thread({ decodeLoop(ex, codec) }, "openvcam-decoder").apply { start() }
+            thread = Thread({ decodeLoop(extractor, codec) }, "openvcam-decoder").apply { start() }
+            true
         } catch (_: Throwable) {
-            release()
+            runCatching { decoder?.stop(); decoder?.release() }
+            runCatching { ex?.release() }
+            runCatching { descriptor?.close() }
+            false
+        }
+    }
+
+    private fun publish(bytes: ByteArray, width: Int, height: Int) {
+        frame = Frame(bytes, width, height)
+        frameVersion++
+        synchronized(transformLock) {
+            lastTransformKey = null
+            lastTransform = null
         }
     }
 
@@ -132,10 +171,8 @@ class Nv21Decoder(private val context: Context) {
                                 runCatching {
                                     val image: Image? = codec.getOutputImage(outputIndex)
                                     if (image != null) {
-                                        imageToNv21(image)?.let { frame ->
-                                            rawFrame = frame
-                                            rawWidth = image.width
-                                            rawHeight = image.height
+                                        imageToNv21(image)?.let { bytes ->
+                                            publish(bytes, image.width, image.height)
                                         }
                                         image.close()
                                     }
@@ -153,7 +190,9 @@ class Nv21Decoder(private val context: Context) {
                     }
                 }
 
-                if (!playing) Thread.sleep(40)
+                val pauseMs = if (!playing) 60L
+                else ((1f / speed.coerceAtLeast(0.25f) - 1f) * 16f).toLong().coerceAtLeast(0)
+                if (pauseMs > 0) Thread.sleep(pauseMs)
             } catch (t: Throwable) {
                 if (!running.get()) break
             }
@@ -163,14 +202,27 @@ class Nv21Decoder(private val context: Context) {
     /** Returns a frame scaled/rotated/mirrored to the requested preview size. */
     fun frame(width: Int, height: Int): ByteArray? {
         if (width <= 0 || height <= 0) return null
-        val src = rawFrame ?: return null
-        val sw = rawWidth
-        val sh = rawHeight
+        val current = frame ?: return null
+        val src = current.bytes
+        val sw = current.width
+        val sh = current.height
         if (sw <= 0 || sh <= 0) return null
-        if (sw == width && sh == height && rotation % 180 == 0 && !mirror &&
+
+        val key = "$frameVersion|$sw|$sh|$width|$height|$rotation|$mirror|$zoom|$crop"
+        synchronized(transformLock) {
+            if (key == lastTransformKey) lastTransform?.let { return it }
+        }
+
+        val out = if (sw == width && sh == height && rotation % 180 == 0 && !mirror &&
             zoom == 1f && crop == "full"
-        ) return src
-        return transformNv21(src, sw, sh, width, height, rotation, mirror, zoom, crop)
+        ) src
+        else transformNv21(src, sw, sh, width, height, rotation, mirror, zoom, crop)
+
+        synchronized(transformLock) {
+            lastTransformKey = key
+            lastTransform = out
+        }
+        return out
     }
 
     fun release() {
@@ -183,44 +235,55 @@ class Nv21Decoder(private val context: Context) {
         codec = null
         extractor = null
         afd = null
-        rawFrame = null
+        frame = null
         currentKey = null
+        synchronized(transformLock) {
+            lastTransformKey = null
+            lastTransform = null
+        }
     }
 
     private fun imageToNv21(image: Image): ByteArray? {
         val planes = image.planes
-        if (planes.size < 3) return null
+        if (planes.size < 2) return null
         val w = image.width
         val h = image.height
         val yPlane = planes[0]
-        val uPlane = planes[1]
-        val vPlane = planes[2]
         val out = ByteArray(w * h * 3 / 2)
-
-        val cropLeft = image.cropRect.left
-        val cropTop = image.cropRect.top
-        val yStride = yPlane.rowStride
-        val yPixel = yPlane.pixelStride
-        val uStride = uPlane.rowStride
-        val uPixel = uPlane.pixelStride
-        val vStride = vPlane.rowStride
-        val vPixel = vPlane.pixelStride
-        val uBuf = uPlane.buffer
-        val vBuf = vPlane.buffer
+        val left = image.cropRect.left
+        val top = image.cropRect.top
 
         var index = 0
         for (row in 0 until h) {
-            val base = (cropTop + row) * yStride + cropLeft * yPixel
+            val base = (top + row) * yPlane.rowStride + left * yPlane.pixelStride
             for (col in 0 until w) {
-                out[index++] = yPlane.buffer.get(base + col * yPixel)
+                out[index++] = yPlane.buffer.get(base + col * yPlane.pixelStride)
             }
         }
-        for (row in 0 until h / 2) {
-            val uBase = (cropTop / 2 + row) * uStride + (cropLeft / 2) * uPixel
-            val vBase = (cropTop / 2 + row) * vStride + (cropLeft / 2) * vPixel
-            for (col in 0 until w / 2) {
-                out[index++] = vBuf.get(vBase + col * vPixel)
-                out[index++] = uBuf.get(uBase + col * uPixel)
+
+        if (planes.size >= 3) {
+            // Planar / flexible YUV: planes[1] = U, planes[2] = V.
+            val u = planes[1]
+            val v = planes[2]
+            for (row in 0 until h / 2) {
+                val uBase = (top / 2 + row) * u.rowStride + (left / 2) * u.pixelStride
+                val vBase = (top / 2 + row) * v.rowStride + (left / 2) * v.pixelStride
+                for (col in 0 until w / 2) {
+                    out[index++] = v.buffer.get(vBase + col * v.pixelStride)
+                    out[index++] = u.buffer.get(uBase + col * u.pixelStride)
+                }
+            }
+        } else {
+            // Semi-planar YUV420 (NV12: interleaved U,V) -> NV21 (V,U).
+            val uv = planes[1]
+            val uvBase = (top / 2) * uv.rowStride + (left / 2) * uv.pixelStride
+            for (row in 0 until h / 2) {
+                var uvIndex = uvBase + row * uv.rowStride
+                for (col in 0 until w / 2) {
+                    out[index++] = uv.buffer.get(uvIndex + uv.pixelStride) // V
+                    out[index++] = uv.buffer.get(uvIndex)                 // U
+                    uvIndex += uv.pixelStride * 2
+                }
             }
         }
         return out
@@ -295,5 +358,6 @@ class Nv21Decoder(private val context: Context) {
 
     fun updateConfig(config: JSONObject?) {
         playing = config?.optBoolean("playing", true) ?: true
+        speed = (config?.optDouble("speed", 1.0) ?: 1.0).toFloat().coerceIn(0.25f, 4f)
     }
 }

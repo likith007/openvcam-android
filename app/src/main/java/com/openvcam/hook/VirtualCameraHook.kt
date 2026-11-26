@@ -31,12 +31,16 @@ class VirtualCameraHook : IXposedHookLoadPackage {
     }
 
     private fun installOnce(loader: ClassLoader) {
-        if (!installed.add(loader)) return
+        synchronized(installed) {
+            if (!installed.add(loader)) return
+        }
         runCatching { Camera1Hook.install(loader) }
         runCatching { Camera2Hook.install(loader) }
     }
 
     companion object {
-        private val installed = Collections.newSetFromMap(IdentityHashMap<ClassLoader, Boolean>())
+        private val installed = Collections.synchronizedSet(
+            Collections.newSetFromMap(IdentityHashMap<ClassLoader, Boolean>())
+        )
     }
 }

@@ -23,6 +23,7 @@ data class AppConfig(
     var speed: Float = 1f,
     var positionMs: Long = 0L,
     var audioMode: String = "off",      // off | video | mic
+    var theme: String = "system",       // system | light | dark
     var targets: MutableSet<String> = mutableSetOf(),
     var presetNames: MutableList<String> =
         mutableListOf("Main", "Preset 1", "Preset 2", "Preset 3", "Preset 4"),
@@ -85,22 +86,27 @@ class ConfigStore private constructor(private val context: Context) {
         }
     }
 
-    fun save() {
-        synchronized(lock) {
-            try {
-                file.writeText(toJson(current).toString())
-            } catch (_: Throwable) {
+    private fun persistLocked() {
+        val temp = File(file.parentFile, "config.json.tmp")
+        try {
+            temp.writeText(toJson(current).toString())
+            if (!temp.renameTo(file)) {
+                file.writeText(temp.readText())
+                temp.delete()
             }
+        } catch (_: Throwable) {
+            runCatching { temp.delete() }
         }
+    }
+
+    fun save() {
+        synchronized(lock) { persistLocked() }
     }
 
     fun update(block: AppConfig.() -> Unit) {
         synchronized(lock) {
             current.block()
-            try {
-                file.writeText(toJson(current).toString())
-            } catch (_: Throwable) {
-            }
+            persistLocked()
         }
     }
 
@@ -134,6 +140,10 @@ class ConfigStore private constructor(private val context: Context) {
                         else -> "off"
                     }
                 }
+                "setTheme" -> theme = when (value as? String) {
+                    "light", "dark" -> value as String
+                    else -> "system"
+                }
                 "toggleEnabled" -> enabled = !enabled
                 "reset" -> {
                     activeSource.rotation = 0
@@ -159,6 +169,7 @@ class ConfigStore private constructor(private val context: Context) {
         put("speed", c.speed.toDouble())
         put("positionMs", c.positionMs)
         put("audioMode", c.audioMode)
+        put("theme", c.theme)
         put("targets", JSONArray(c.targets))
         put("presetNames", JSONArray(c.presetNames))
         put("sources", JSONArray().apply {
@@ -215,6 +226,7 @@ class ConfigStore private constructor(private val context: Context) {
             speed = json.optDouble("speed", 1.0).toFloat(),
             positionMs = json.optLong("positionMs", 0L),
             audioMode = json.optString("audioMode", "off"),
+            theme = json.optString("theme", "system"),
             targets = targets,
             presetNames = names,
             sources = sources

@@ -8,10 +8,12 @@ and it contains **no login, licensing, or subscription code**.
 
 ## Features
 
-- **Clean minimal UI** — a single scrollable page with a gradient status banner, icon banners,
-  Material 3 icons, rounded cards, and smooth animated sections
+- **Clean minimal UI** — bottom navigation (Home, Media, Targets, Settings), material icons,
+  gradient status banners, rounded cards, and smooth animated sections
+- **Theme switch** — System, Light, or a dark **Pro** look, saved with the rest of your config
 - **Environment status** — root access, installed hooking framework, active hook integration,
   and the number of selected scopes at a glance
+- **Playback controls** — play, pause, reset, virtual/real toggle, playback speed, and audio mode
 - **Target apps** — searchable, selectable list of installed apps whose camera should be hooked
 - **Media source** — Main + 4 presets; pick an image or a video from your gallery
 - **Live preview** — shows exactly how the selected media will look with all edits applied
@@ -76,7 +78,8 @@ LSPosed/Vector at runtime, so no Xposed classes are packaged into the APK.
 
 ## Known limitations
 
-- LSPosed module scope cannot be changed programmatically; the Target apps list is a reminder helper.
+- LSPosed module scope cannot be changed programmatically. The Target apps list is also required:
+  only apps in that list are allowed to read config/media from OpenVCam's provider.
 - Camera2 supports ordinary `createCaptureSession` flows; complex reprocessing, physical
   multi-camera sessions, and `SessionConfiguration` sessions may not be replaced.
 - Compatibility varies by device, camera API, and target app. Test before relying on it.

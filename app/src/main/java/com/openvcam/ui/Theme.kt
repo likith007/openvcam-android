@@ -66,9 +66,14 @@ private val AppTypography = Typography(
 )
 
 @Composable
-fun OpenVCamTheme(content: @Composable () -> Unit) {
+fun OpenVCamTheme(theme: String = "system", content: @Composable () -> Unit) {
+    val dark = when (theme) {
+        "light" -> false
+        "dark" -> true
+        else -> isSystemInDarkTheme()
+    }
     MaterialTheme(
-        colorScheme = if (isSystemInDarkTheme()) DarkColors else LightColors,
+        colorScheme = if (dark) DarkColors else LightColors,
         shapes = AppShapes,
         typography = AppTypography,
         content = content

@@ -19,7 +19,13 @@ object Camera1Hook {
     private class State(val camera: Camera, val context: android.content.Context) {
         var originalTexture: SurfaceTexture? = null
         var originalSurface: Surface? = null
+        var targetSurface: Surface? = null
+        var ownedTargetSurface: Surface? = null
         var dummyTexture: SurfaceTexture? = null
+        var dummyTextureDrainer: DummyFrameDrainer? = null
+        var dummySurfaceTexture: SurfaceTexture? = null
+        var dummySurfaceDrainer: DummyFrameDrainer? = null
+        var dummySurface: Surface? = null
         var renderer: GLPreviewRenderer? = null
         val decoder = Nv21Decoder(context)
     }
@@ -29,6 +35,48 @@ object Camera1Hook {
     private fun state(camera: Camera): State {
         val context = HookConfig.context ?: throw IllegalStateException("no context")
         return states.getOrPut(camera) { State(camera, context) }
+    }
+
+    private fun stopRenderer(s: State) {
+        s.renderer?.stop()
+        s.renderer = null
+    }
+
+    private fun releaseDummy(texture: SurfaceTexture?, drainer: DummyFrameDrainer?) {
+        if (drainer != null) drainer.release() else runCatching { texture?.release() }
+    }
+
+    private fun dispose(s: State) {
+        stopRenderer(s)
+        s.decoder.release()
+        releaseDummy(s.dummyTexture, s.dummyTextureDrainer)
+        runCatching { s.dummySurface?.release() }
+        releaseDummy(s.dummySurfaceTexture, s.dummySurfaceDrainer)
+        runCatching { s.ownedTargetSurface?.release() }
+        s.dummyTexture = null
+        s.dummyTextureDrainer = null
+        s.dummySurface = null
+        s.dummySurfaceTexture = null
+        s.dummySurfaceDrainer = null
+        s.ownedTargetSurface = null
+        s.originalTexture = null
+        s.originalSurface = null
+        s.targetSurface = null
+    }
+
+    private fun ensureRenderer(s: State, cfg: JSONObject?, source: JSONObject?) {
+        if (!HookConfig.shouldReplace(cfg)) {
+            stopRenderer(s)
+            return
+        }
+        val target = s.targetSurface ?: return
+        if (!target.isValid) {
+            stopRenderer(s)
+            return
+        }
+        if (s.renderer == null) s.renderer = GLPreviewRenderer(s.context, target)
+        s.renderer?.start(source, cfg)
+        s.renderer?.updateConfig(source, cfg)
     }
 
     private class PreviewProxy(
@@ -53,7 +101,9 @@ object Camera1Hook {
                         }
                     }
                 }
-                state.renderer?.updateConfig(source, cfg)
+                ensureRenderer(state, cfg, source)
+            } else {
+                stopRenderer(state)
             }
 
             try {
@@ -78,10 +128,10 @@ object Camera1Hook {
             listOf("setPreviewCallback", "setPreviewCallbackWithBuffer", "setOneShotPreviewCallback"),
             object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
-                    if (!HookConfig.shouldReplace(HookConfig.snapshot())) return
-                    val camera = param.thisObject as? Camera ?: return
                     val original = param.args.getOrNull(0) ?: return
                     if (original is PreviewProxy) return
+                    if (!HookConfig.shouldReplace(HookConfig.snapshot())) return
+                    val camera = param.thisObject as? Camera ?: return
                     param.args[0] = PreviewProxy(original, state(camera))
                 }
             },
@@ -93,13 +143,36 @@ object Camera1Hook {
             listOf("setPreviewTexture"),
             object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
-                    if (!HookConfig.shouldReplace(HookConfig.snapshot())) return
                     val camera = param.thisObject as? Camera ?: return
+                    if (param.args.getOrNull(0) == null) {
+                        states[camera]?.let { s ->
+                            stopRenderer(s)
+                            releaseDummy(s.dummyTexture, s.dummyTextureDrainer)
+                            runCatching { s.ownedTargetSurface?.release() }
+                            s.dummyTexture = null
+                            s.dummyTextureDrainer = null
+                            s.ownedTargetSurface = null
+                            s.originalTexture = null
+                            s.targetSurface = null
+                        }
+                        return
+                    }
+                    if (!HookConfig.shouldReplace(HookConfig.snapshot())) return
                     val original = param.args.getOrNull(0) as? SurfaceTexture ?: return
                     val s = state(camera)
+                    releaseDummy(s.dummyTexture, s.dummyTextureDrainer)
+                    runCatching { s.ownedTargetSurface?.release() }
                     s.originalTexture = original
-                    val dummy = SurfaceTexture(15)
-                    dummy.setOnFrameAvailableListener { st -> runCatching { st.updateTexImage() } }
+                    s.originalSurface = null
+                    val target = try { Surface(original) } catch (_: Throwable) { null }
+                    s.ownedTargetSurface = target
+                    s.targetSurface = target
+                    val drainer = DummyFrameDrainer.createOrNull()
+                    val dummy = drainer?.texture ?: SurfaceTexture(15).also { fallback ->
+                        fallback.setDefaultBufferSize(1, 1)
+                        fallback.setOnFrameAvailableListener { st -> runCatching { st.updateTexImage() } }
+                    }
+                    s.dummyTextureDrainer = drainer
                     s.dummyTexture = dummy
                     param.args[0] = dummy
                 }
@@ -112,17 +185,48 @@ object Camera1Hook {
             listOf("setPreviewDisplay"),
             object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
-                    if (!HookConfig.shouldReplace(HookConfig.snapshot())) return
                     val camera = param.thisObject as? Camera ?: return
+                    if (param.args.getOrNull(0) == null) {
+                        states[camera]?.let { s ->
+                            stopRenderer(s)
+                            runCatching { s.dummySurface?.release() }
+                            releaseDummy(s.dummySurfaceTexture, s.dummySurfaceDrainer)
+                            s.dummySurface = null
+                            s.dummySurfaceTexture = null
+                            s.dummySurfaceDrainer = null
+                            s.originalSurface = null
+                            s.targetSurface = null
+                        }
+                        return
+                    }
+                    if (!HookConfig.shouldReplace(HookConfig.snapshot())) return
                     val holder = param.args.getOrNull(0) as? SurfaceHolder ?: return
                     val s = state(camera)
                     s.originalSurface = try { holder.surface } catch (_: Throwable) { null }
+                    s.targetSurface = s.originalSurface
+                    s.originalTexture = null
+                    runCatching { s.ownedTargetSurface?.release() }
+                    s.ownedTargetSurface = null
+                    val texture = s.dummySurfaceTexture ?: run {
+                        val drainer = DummyFrameDrainer.createOrNull()
+                        val st = drainer?.texture ?: SurfaceTexture(16).also { fallback ->
+                            fallback.setDefaultBufferSize(1, 1)
+                            fallback.setOnFrameAvailableListener { source ->
+                                runCatching { source.updateTexImage() }
+                            }
+                        }
+                        s.dummySurfaceDrainer = drainer
+                        s.dummySurfaceTexture = st
+                        st
+                    }
+                    s.dummySurface = s.dummySurface ?: Surface(texture)
+                    val dummySurface = s.dummySurface
                     val dummy = Proxy.newProxyInstance(
                         SurfaceHolder::class.java.classLoader,
                         arrayOf(SurfaceHolder::class.java)
-                    ) { _, method, args ->
+                    ) { _, method, _ ->
                         when (method.name) {
-                            "getSurface" -> Surface(SurfaceTexture(16))
+                            "getSurface" -> dummySurface
                             "getSurfaceFrame" -> Rect(0, 0, 1, 1)
                             "addCallback", "removeCallback", "setFixedSize", "setSizeFromLayout",
                             "setFormat", "setType", "setKeepScreenOn" -> null
@@ -143,16 +247,10 @@ object Camera1Hook {
             listOf("startPreview"),
             object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
-                    if (!HookConfig.shouldReplace(HookConfig.snapshot())) return
                     val camera = param.thisObject as? Camera ?: return
-                    val s = state(camera)
-                    val cfg = HookConfig.snapshot()
-                    val source = HookConfig.activeSource(cfg)
-                    val target = s.originalSurface ?: s.originalTexture?.let {
-                        try { Surface(it) } catch (_: Throwable) { null }
-                    } ?: return
-                    s.renderer?.stop()
-                    s.renderer = GLPreviewRenderer(s.context, target).also { it.start(source, cfg) }
+                    val s = states[camera] ?: return
+                    val cfg = HookConfig.snapshot() ?: return
+                    ensureRenderer(s, cfg, HookConfig.activeSource(cfg))
                 }
             },
             "Camera1.start"
@@ -160,18 +258,27 @@ object Camera1Hook {
 
         HookUtils.hookAllNamed(
             cameraClass,
-            listOf("stopPreview", "release"),
+            listOf("stopPreview"),
             object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     val camera = param.thisObject as? Camera ?: return
-                    states.remove(camera)?.let { s ->
-                        s.renderer?.stop()
-                        s.decoder.release()
-                        runCatching { s.dummyTexture?.release() }
-                    }
+                    // Keep the saved target so startPreview() can restore the renderer.
+                    states[camera]?.let { stopRenderer(it) }
                 }
             },
             "Camera1.stop"
+        )
+
+        HookUtils.hookAllNamed(
+            cameraClass,
+            listOf("release"),
+            object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    val camera = param.thisObject as? Camera ?: return
+                    states.remove(camera)?.let { dispose(it) }
+                }
+            },
+            "Camera1.release"
         )
 
         HookUtils.hookAllNamed(
@@ -189,6 +296,7 @@ object Camera1Hook {
                     val jpeg = if (args.size == 3) args[2] else args.getOrNull(3)
                     val s = state(camera)
                     s.decoder.configure(HookConfig.activeSource(cfg), cfg)
+                    s.decoder.updateConfig(cfg)
 
                     val pictureSize = try { camera.parameters.pictureSize } catch (_: Throwable) { null }
                     val width = pictureSize?.width ?: 1280

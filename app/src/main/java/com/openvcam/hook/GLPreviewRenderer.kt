@@ -35,9 +35,14 @@ class GLPreviewRenderer(private val context: Context, private val surface: Surfa
     private var textureOes = 0
     private var texture2d = 0
     private var surfaceTexture: android.graphics.SurfaceTexture? = null
+    private var playerSurface: Surface? = null
     private var player: MediaPlayer? = null
     private var videoMode = false
     private var frameAvailable = false
+    private var appliedSpeed: Float? = null
+    private var appliedPlaying: Boolean? = null
+    private var appliedAudio: String? = null
+    private var lastSeekMs = -1L
 
     @Volatile private var rotation = 0
     @Volatile private var mirror = false
@@ -47,6 +52,8 @@ class GLPreviewRenderer(private val context: Context, private val surface: Surfa
     @Volatile private var sourceHeight = 0
     @Volatile private var speed = 1f
     @Volatile private var playing = true
+    @Volatile private var audioMode = "off"
+    @Volatile private var positionMs = 0L
     @Volatile private var lastKey = ""
 
     private val positions = floatArrayOf(
@@ -65,6 +72,8 @@ class GLPreviewRenderer(private val context: Context, private val surface: Surfa
             updateConfig(source, config)
             return
         }
+        // A different media identity (or a renderer that exited after its surface died)
+        // needs a fresh GL context and textures.
         stop()
         lastKey = key
         videoMode = type == "video"
@@ -77,10 +86,23 @@ class GLPreviewRenderer(private val context: Context, private val surface: Surfa
         applyConfig(source, config)
         val player = player ?: return
         try {
-            val p = android.media.PlaybackParams().setSpeed(speed)
-            player.playbackParams = p
-            if (playing && !player.isPlaying) player.start()
-            if (!playing && player.isPlaying) player.pause()
+            if (appliedSpeed != speed) {
+                player.playbackParams = android.media.PlaybackParams().setSpeed(speed)
+                appliedSpeed = speed
+            }
+            val volume = if (audioMode == "video") 1f else 0f
+            if (appliedAudio != audioMode) {
+                player.setVolume(volume, volume)
+                appliedAudio = audioMode
+            }
+            if (appliedPlaying != playing) {
+                if (playing) player.start() else player.pause()
+                appliedPlaying = playing
+            }
+            if (lastSeekMs != positionMs) {
+                if (positionMs >= 0) player.seekTo(positionMs.coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
+                lastSeekMs = positionMs
+            }
         } catch (_: Throwable) {
         }
     }
@@ -92,6 +114,8 @@ class GLPreviewRenderer(private val context: Context, private val surface: Surfa
         crop = source?.optString("crop", "full") ?: "full"
         speed = (config?.optDouble("speed", 1.0) ?: 1.0).toFloat().coerceIn(0.25f, 4f)
         playing = config?.optBoolean("playing", true) ?: true
+        audioMode = config?.optString("audioMode", "off") ?: "off"
+        positionMs = config?.optLong("positionMs", 0L) ?: 0L
     }
 
     private fun renderLoop(path: String) {
@@ -136,6 +160,7 @@ class GLPreviewRenderer(private val context: Context, private val surface: Surfa
             }
         } catch (_: Throwable) {
         } finally {
+            running.set(false)
             cleanupGl()
         }
     }
@@ -223,13 +248,25 @@ class GLPreviewRenderer(private val context: Context, private val surface: Surfa
                 sourceHeight = h
             }
             mp.setDataSource(context, HookConfig.mediaUri(path))
-            mp.setSurface(Surface(st))
+            val output = Surface(st)
+            playerSurface = output
+            mp.setSurface(output)
             mp.isLooping = true
             try {
                 mp.playbackParams = android.media.PlaybackParams().setSpeed(speed)
+                mp.setVolume(if (audioMode == "video") 1f else 0f, if (audioMode == "video") 1f else 0f)
             } catch (_: Throwable) {
             }
-            if (!playing) mp.pause() else mp.start()
+            appliedSpeed = null
+            appliedPlaying = null
+            appliedAudio = null
+            lastSeekMs = -1L
+            if (!playing) {
+                mp.prepare()
+                mp.pause()
+            } else {
+                mp.start()
+            }
             player = mp
         } else {
             val stream = context.contentResolver.openInputStream(HookConfig.mediaUri(path)) ?: return
@@ -276,10 +313,21 @@ class GLPreviewRenderer(private val context: Context, private val surface: Surfa
     private fun cleanupGl() {
         runCatching { player?.stop(); player?.release() }
         player = null
+        appliedSpeed = null
+        appliedPlaying = null
+        appliedAudio = null
+        lastSeekMs = -1L
+        runCatching { playerSurface?.release() }
+        playerSurface = null
         runCatching { surfaceTexture?.release() }
         surfaceTexture = null
         if (display != EGL14.EGL_NO_DISPLAY) {
             runCatching {
+                EGL14.eglMakeCurrent(display, eglSurface, eglSurface, contextEgl)
+                if (programOes != 0) GLES20.glDeleteProgram(programOes)
+                if (program2d != 0) GLES20.glDeleteProgram(program2d)
+                if (textureOes != 0) GLES20.glDeleteTextures(1, intArrayOf(textureOes), 0)
+                if (texture2d != 0) GLES20.glDeleteTextures(1, intArrayOf(texture2d), 0)
                 EGL14.eglMakeCurrent(
                     display,
                     EGL14.EGL_NO_SURFACE,
@@ -292,18 +340,26 @@ class GLPreviewRenderer(private val context: Context, private val surface: Surfa
                 EGL14.eglTerminate(display)
             }
         }
+        programOes = 0
+        program2d = 0
+        textureOes = 0
+        texture2d = 0
         display = EGL14.EGL_NO_DISPLAY
         contextEgl = EGL14.EGL_NO_CONTEXT
         eglSurface = EGL14.EGL_NO_SURFACE
+        synchronized(frameLock) { frameAvailable = false }
     }
 
     fun stop() {
-        if (!running.get()) return
         running.set(false)
-        synchronized(frameLock) { frameLock.notifyAll() }
+        synchronized(frameLock) {
+            frameAvailable = false
+            frameLock.notifyAll()
+        }
         val t = thread
         try { t?.join(1500) } catch (_: InterruptedException) { }
         thread = null
+        if (t == null || !t.isAlive) cleanupGl()
         lastKey = ""
     }
 
