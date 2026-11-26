@@ -252,14 +252,28 @@ private fun MinimalScreen() {
         refresh()
     }
     fun edit(block: AppConfig.() -> Unit) {
-        store.update(block)
+        store.update {
+            block()
+            // The hook is only meaningful with both a feed and at least one app.
+            if (activeSource.type == "none" || targets.isEmpty()) enabled = false
+        }
         refresh()
     }
 
     LaunchedEffect(Unit) {
+        // A hook enabled before media/targets were chosen would blank the camera.
+        val initial = store.config
+        if (initial.enabled && (initial.activeSource.type == "none" || initial.targets.isEmpty())) {
+            store.update { enabled = false }
+            refresh()
+        }
         root = withContext(Dispatchers.IO) { hasRoot() }
         framework = withContext(Dispatchers.IO) { detectFramework(context) }
-        apps.value = withContext(Dispatchers.IO) { UiUtils.installedApps(context) }
+    }
+    LaunchedEffect(expandedTargets) {
+        if (expandedTargets && apps.value.isEmpty()) {
+            apps.value = withContext(Dispatchers.IO) { UiUtils.installedApps(context) }
+        }
     }
     LaunchedEffect(Unit) {
         while (true) {
@@ -313,6 +327,7 @@ private fun MinimalScreen() {
                     framework = framework,
                     hookActive = hookActive,
                     scopeCount = cfg.targets.size,
+                    canEnable = cfg.activeSource.type != "none" && cfg.targets.isNotEmpty(),
                     onToggle = { apply("toggleEnabled") },
                     onFixRoot = {
                         fixWithRoot(context) { ok, detected ->
@@ -373,6 +388,7 @@ private fun HeroCard(
     framework: String,
     hookActive: Boolean,
     scopeCount: Int,
+    canEnable: Boolean,
     onToggle: () -> Unit,
     onFixRoot: () -> Unit,
     onOpenFramework: () -> Unit
@@ -423,13 +439,23 @@ private fun HeroCard(
 
                 Button(
                     onClick = onToggle,
+                    enabled = enabled || canEnable,
                     modifier = Modifier.fillMaxWidth(),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = Color.White,
-                        contentColor = primary
+                        contentColor = primary,
+                        disabledContainerColor = Color.White.copy(alpha = 0.35f),
+                        disabledContentColor = Color.White
                     )
                 ) {
                     Text(if (enabled) "Disable hook" else "Enable hook", fontWeight = FontWeight.Bold)
+                }
+                if (!enabled && !canEnable) {
+                    Text(
+                        "Select media and at least one target app first",
+                        color = Color.White.copy(alpha = 0.85f),
+                        style = MaterialTheme.typography.bodySmall
+                    )
                 }
 
                 Row(
@@ -684,7 +710,7 @@ private fun TargetCard(
     val filtered = apps.filter {
         it.label.contains(query, ignoreCase = true) ||
             it.packageName.contains(query, ignoreCase = true)
-    }
+    }.take(80)
     Card(Modifier.fillMaxWidth().animateContentSize()) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(

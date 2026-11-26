@@ -252,6 +252,9 @@ class GLPreviewRenderer(private val context: Context, private val surface: Surfa
             playerSurface = output
             mp.setSurface(output)
             mp.isLooping = true
+            // MediaPlayer must be prepared before start()/pause(); starting directly
+            // throws and left the preview permanently black.
+            mp.prepare()
             try {
                 mp.playbackParams = android.media.PlaybackParams().setSpeed(speed)
                 mp.setVolume(if (audioMode == "video") 1f else 0f, if (audioMode == "video") 1f else 0f)
@@ -261,12 +264,7 @@ class GLPreviewRenderer(private val context: Context, private val surface: Surfa
             appliedPlaying = null
             appliedAudio = null
             lastSeekMs = -1L
-            if (!playing) {
-                mp.prepare()
-                mp.pause()
-            } else {
-                mp.start()
-            }
+            if (playing) mp.start() else mp.pause()
             player = mp
         } else {
             val stream = context.contentResolver.openInputStream(HookConfig.mediaUri(path)) ?: return

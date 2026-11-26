@@ -19,12 +19,11 @@ and it contains **no login, licensing, or subscription code**.
 - **Live preview** — shows exactly how the selected media will look with all edits applied
 - **Editing** — crop to universal presets (Full, Square, 4:3, 16:9, 9:16), rotate ±90°, mirror,
   and zoom, with changes applied to both the preview and the injected camera feed
-- **Enable/disable switch** — instantly turn the virtual camera on or off
-- **Root helper** — one-tap grant of overlay and notification permissions plus root-started
-  background services for best reliability
+- **Enable/disable button** — available only after a media source and at least one target app are selected
+- **Root helper** — one-tap grant of notification permission and root-started keep-alive service
 - Camera1: preview callback NV21 injection, preview surface replacement, photo capture replacement
-- Camera2: session output redirection + GL preview rendering, JPEG still-image replacement
-- Floating draggable control bubble over other apps
+- Camera2: session output redirection + GL preview rendering, JPEG still-image replacement,
+  `SessionConfiguration` support
 - Exported `ContentProvider` used by hooks to read the shared config and media
 
 ## Build
@@ -58,16 +57,16 @@ LSPosed/Vector at runtime, so no Xposed classes are packaged into the APK.
 ## Install and use
 
 1. Install the APK on a rooted device running Android 9+ (API 28+).
-2. Open OpenVCam. Allow notifications (Android 13+) and grant overlay access if asked.
-3. Tap **Fix with root** on the Environment card to grant permissions and launch the services
-   with root for best results.
+2. Open OpenVCam. Allow notifications if asked. Deny `su` if you do not want root mode.
+3. Tap **Fix root** if root is not detected; it grants the notification permission and starts
+   the keep-alive service with root.
 4. Install LSPosed or Vector, enable the **OpenVCam** module, and scope the apps from the
    **Target apps** list. Scope must be set in the framework's own UI — OpenVCam can only remember
    your selection.
-5. Pick an image or video for Main (and optionally the presets), adjust crop/rotation/mirror/zoom,
-   then force-stop and reopen each target app.
-6. The live preview shows exactly what will be injected. Use the enable switch to toggle between
-   the virtual feed and the real camera.
+5. Pick an image or video for Main (and optionally the presets), adjust crop/rotation/mirror/zoom.
+6. Open **Target apps** and select the apps you scoped in LSPosed/Vector.
+7. Tap **Enable hook**, then force-stop and reopen each target app. Use **Disable hook** to
+   return to the real camera instantly.
 
 ## Status indicators
 
@@ -80,7 +79,7 @@ LSPosed/Vector at runtime, so no Xposed classes are packaged into the APK.
 
 - LSPosed module scope cannot be changed programmatically. The Target apps list is also required:
   only apps in that list are allowed to read config/media from OpenVCam's provider.
-- Camera2 supports ordinary `createCaptureSession` flows; complex reprocessing, physical
-  multi-camera sessions, and `SessionConfiguration` sessions may not be replaced.
+- Camera2 supports ordinary capture sessions, `SessionConfiguration` and basic reprocessing;
+  physical multi-camera sessions may still vary by device.
 - Compatibility varies by device, camera API, and target app. Test before relying on it.
 - Use only where you have permission to substitute the camera feed.

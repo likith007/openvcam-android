@@ -1,6 +1,7 @@
 package com.openvcam.ui
 
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.provider.OpenableColumns
 import com.openvcam.core.ConfigStore
@@ -38,12 +39,14 @@ object UiUtils {
     fun installedApps(context: Context): List<AppEntry> {
         val pm = context.packageManager
         return try {
-            pm.getInstalledPackages(0)
-                .mapNotNull { info ->
-                    val pkg = info.packageName ?: return@mapNotNull null
+            // Launchable apps are far faster to enumerate than every installed package
+            // and are the apps that actually own a camera UI.
+            val launcher = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+            pm.queryIntentActivities(launcher, 0)
+                .mapNotNull { resolve ->
+                    val pkg = resolve.activityInfo?.packageName ?: return@mapNotNull null
                     if (pkg == context.packageName || pkg == "android") return@mapNotNull null
-                    val appInfo = info.applicationInfo ?: return@mapNotNull null
-                    val label = pm.getApplicationLabel(appInfo)?.toString()?.takeIf { it.isNotBlank() }
+                    val label = resolve.loadLabel(pm)?.toString()?.takeIf { it.isNotBlank() }
                         ?: pkg.substringAfterLast('.')
                     AppEntry(label, pkg)
                 }

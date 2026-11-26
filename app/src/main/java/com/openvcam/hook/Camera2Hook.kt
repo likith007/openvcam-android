@@ -7,6 +7,8 @@ import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
 import android.media.Image
+import android.os.Handler
+import android.os.Looper
 import android.media.ImageReader
 import android.view.Surface
 import de.robv.android.xposed.callbacks.XC_MethodHook
@@ -39,6 +41,7 @@ object Camera2Hook {
     private val sessionKeys = Collections.synchronizedMap(WeakHashMap<Any, SessionState>())
     private val pending = ThreadLocal.withInitial { mutableListOf<Dummy>() }
     @Volatile private var jpegDecoder: Nv21Decoder? = null
+    @Volatile private var syncRetryPending = false
 
     private fun isReaderSurface(surface: Surface): Boolean = imageReaderSurfaces.contains(surface)
 
@@ -126,19 +129,41 @@ object Camera2Hook {
         }
     }
 
+    private fun scheduleConfigSync(attempts: Int = 16) {
+        if (syncRetryPending) return
+        syncRetryPending = true
+        Handler(Looper.getMainLooper()).postDelayed({
+            syncRetryPending = false
+            val cfg = HookConfig.snapshot()
+            syncRenderers(cfg)
+            val waiting = sessions.values.any { state ->
+                !state.disposed && HookConfig.shouldReplace(cfg) && state.renderers.isEmpty()
+            }
+            if (waiting && attempts > 1) scheduleConfigSync(attempts - 1)
+        }, 300L)
+    }
+
     private fun syncRenderers(cfg: JSONObject?) {
         val context = HookConfig.context ?: return
         val shouldReplace = HookConfig.shouldReplace(cfg)
         val source = HookConfig.activeSource(cfg)
+        val usable = HookConfig.pathOf(source)?.let { path ->
+            HookConfig.typeOf(source).let { it == "video" || it == "image" }
+        } ?: false
+        var needsRetry = false
         sessions.values.toList().forEach { state ->
             if (state.disposed) return@forEach
-            if (!shouldReplace) {
+            if (!shouldReplace || !usable) {
                 stopRenderers(state)
+                if (shouldReplace && !usable) needsRetry = true
                 return@forEach
             }
             if (state.renderers.isEmpty()) {
                 state.dummies.forEach { dummy ->
-                    if (!dummy.original.isValid) return@forEach
+                    if (!dummy.original.isValid) {
+                        needsRetry = true
+                        return@forEach
+                    }
                     val renderer = GLPreviewRenderer(context, dummy.original)
                     renderer.start(source, cfg)
                     state.renderers.add(renderer)
@@ -149,6 +174,7 @@ object Camera2Hook {
                 renderer.updateConfig(source, cfg)
             }
         }
+        if (needsRetry) scheduleConfigSync()
     }
 
     private fun replaceJpeg(image: Image, decoder: Nv21Decoder, cfg: JSONObject?) {
@@ -236,12 +262,26 @@ object Camera2Hook {
                 val cfg = HookConfig.snapshot()
                 if (!HookConfig.shouldReplace(cfg)) return
                 if (param.args.isEmpty()) return
-                val replaced = when (val outputs = param.args[0]) {
-                    is SessionConfiguration -> replaceSessionConfiguration(outputs) ?: return
-                    is List<*> -> replaceOutputs(outputs)
+                val first = param.args[0]
+                val replaced: Any?
+                val index: Int
+                when {
+                    first is SessionConfiguration -> {
+                        replaced = replaceSessionConfiguration(first) ?: return
+                        index = 0
+                    }
+                    first is List<*> -> {
+                        replaced = replaceOutputs(first)
+                        index = 0
+                    }
+                    param.args.getOrNull(1) is List<*> -> {
+                        // createReprocessableCaptureSession* puts outputs in the second argument.
+                        replaced = replaceOutputs(param.args[1] as List<*>)
+                        index = 1
+                    }
                     else -> return
                 }
-                param.args[0] = replaced
+                param.args[index] = replaced
             }
 
             override fun afterHookedMethod(param: MethodHookParam) {
@@ -346,6 +386,19 @@ object Camera2Hook {
                     }
                 },
                 "Camera2.sessionClose"
+            )
+
+            // Preview requests repeat constantly; use them to apply live config changes
+            // and recover a renderer whose surface became valid late.
+            HookUtils.hookAllNamed(
+                sessionClass,
+                listOf("setRepeatingRequest", "capture", "captureBurst", "setRepeatingBurst"),
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        syncRenderers(HookConfig.snapshot())
+                    }
+                },
+                "Camera2.sync"
             )
         }
     }

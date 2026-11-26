@@ -7,6 +7,7 @@ import android.os.Handler
 import android.os.Looper
 import android.view.Surface
 import android.view.SurfaceHolder
+import android.view.TextureView
 import de.robv.android.xposed.callbacks.XC_MethodHook
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
@@ -27,10 +28,18 @@ object Camera1Hook {
         var dummySurfaceDrainer: DummyFrameDrainer? = null
         var dummySurface: Surface? = null
         var renderer: GLPreviewRenderer? = null
+        var retryPending = false
+        val callbackWrappers = java.util.IdentityHashMap<Any, Any>()
         val decoder = Nv21Decoder(context)
     }
 
     private val states = Collections.synchronizedMap(WeakHashMap<Camera, State>())
+    private val textureStates =
+        Collections.synchronizedMap(java.util.IdentityHashMap<SurfaceTexture, State>())
+    private val globalCallbackWrappers =
+        Collections.synchronizedMap(java.util.IdentityHashMap<Any, Any>())
+    private val globalCallbackOriginals =
+        Collections.synchronizedMap(java.util.IdentityHashMap<Any, Any>())
 
     private fun state(camera: Camera): State {
         val context = HookConfig.context ?: throw IllegalStateException("no context")
@@ -45,6 +54,79 @@ object Camera1Hook {
     private fun releaseDummy(texture: SurfaceTexture?, drainer: DummyFrameDrainer?) {
         if (drainer != null) drainer.release() else runCatching { texture?.release() }
     }
+
+    private fun invokeOn(
+        target: Any?,
+        method: java.lang.reflect.Method,
+        args: Array<Any?>?
+    ): Any? = try {
+        method.invoke(target, *(args ?: emptyArray()))
+    } catch (_: Throwable) {
+        defaultValue(method.returnType)
+    }
+
+    /** Keeps the GL target in sync with SurfaceView lifecycle events. */
+    private fun callbackProxy(s: State, original: Any): Any =
+        Proxy.newProxyInstance(
+            SurfaceHolder.Callback::class.java.classLoader,
+            arrayOf(SurfaceHolder.Callback::class.java)
+        ) { _, method, args ->
+            val result = when (method.name) {
+                "surfaceCreated", "surfaceChanged" -> {
+                    val holder = args?.getOrNull(0) as? SurfaceHolder
+                    if (holder != null) {
+                        s.targetSurface = try { holder.surface } catch (_: Throwable) { null }
+                    }
+                    invokeOn(original, method, args)
+                    ensureFromConfig(s)
+                    return@newProxyInstance null
+                }
+                "surfaceDestroyed" -> {
+                    stopRenderer(s)
+                    s.targetSurface = null
+                    invokeOn(original, method, args)
+                    return@newProxyInstance null
+                }
+                else -> invokeOn(original, method, args)
+            }
+            result
+        }
+
+    /**
+     * Apps usually register their SurfaceView callback before the camera is opened.
+     * Wrapping the holder implementation lets us learn when the real surface appears
+     * even in apps that never install a preview callback.
+     */
+    private fun globalCallbackProxy(original: Any): Any =
+        Proxy.newProxyInstance(
+            SurfaceHolder.Callback::class.java.classLoader,
+            arrayOf(SurfaceHolder.Callback::class.java)
+        ) { _, method, args ->
+            val holder = args?.getOrNull(0) as? SurfaceHolder
+            val surface = if (holder != null) {
+                try { holder.surface } catch (_: Throwable) { null }
+            } else null
+            if (surface != null) {
+                states.values.forEach { s ->
+                    val matches = s.originalSurface === surface ||
+                        s.targetSurface === surface ||
+                        s.ownedTargetSurface === surface
+                    if (matches) {
+                        when (method.name) {
+                            "surfaceCreated", "surfaceChanged" -> {
+                                s.targetSurface = surface
+                                ensureFromConfig(s)
+                            }
+                            "surfaceDestroyed" -> {
+                                stopRenderer(s)
+                                s.targetSurface = null
+                            }
+                        }
+                    }
+                }
+            }
+            invokeOn(original, method, args)
+        }
 
     private fun dispose(s: State) {
         stopRenderer(s)
@@ -62,6 +144,27 @@ object Camera1Hook {
         s.originalTexture = null
         s.originalSurface = null
         s.targetSurface = null
+        s.callbackWrappers.clear()
+        val textures = textureStates.entries.iterator()
+        while (textures.hasNext()) {
+            if (textures.next().value === s) textures.remove()
+        }
+    }
+
+    private fun ensureFromConfig(s: State) {
+        val cfg = HookConfig.snapshot()
+        ensureRenderer(s, cfg, HookConfig.activeSource(cfg))
+    }
+
+    /** Surfaces often become valid after startPreview(); retry briefly until they do. */
+    private fun scheduleRendererRetry(s: State, attempts: Int = 20) {
+        if (s.retryPending) return
+        s.retryPending = true
+        Handler(Looper.getMainLooper()).postDelayed({
+            s.retryPending = false
+            ensureFromConfig(s)
+            if (s.renderer == null && attempts > 1) scheduleRendererRetry(s, attempts - 1)
+        }, 250L)
     }
 
     private fun ensureRenderer(s: State, cfg: JSONObject?, source: JSONObject?) {
@@ -69,9 +172,17 @@ object Camera1Hook {
             stopRenderer(s)
             return
         }
-        val target = s.targetSurface ?: return
-        if (!target.isValid) {
+        // Prefer the most recently reported holder surface, then fall back to the
+        // surfaces captured when the preview target was installed.
+        val target = when {
+            s.targetSurface?.isValid == true -> s.targetSurface
+            s.ownedTargetSurface?.isValid == true -> s.ownedTargetSurface.also { s.targetSurface = it }
+            s.originalSurface?.isValid == true -> s.originalSurface.also { s.targetSurface = it }
+            else -> null
+        }
+        if (target == null) {
             stopRenderer(s)
+            scheduleRendererRetry(s)
             return
         }
         if (s.renderer == null) s.renderer = GLPreviewRenderer(s.context, target)
@@ -138,6 +249,74 @@ object Camera1Hook {
             "Camera1.callback"
         )
 
+        // TextureView surfaces arrive through this listener, often after startPreview().
+        val textureViewClass = HookUtils.findClass("android.view.TextureView", loader)
+        if (textureViewClass != null) {
+            HookUtils.hookAllNamed(
+                textureViewClass,
+                listOf("setSurfaceTextureListener"),
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val listener = param.args.getOrNull(0) ?: return
+                        param.args[0] = Proxy.newProxyInstance(
+                            TextureView.SurfaceTextureListener::class.java.classLoader,
+                            arrayOf(TextureView.SurfaceTextureListener::class.java)
+                        ) { _, method, args ->
+                            when (method.name) {
+                                "onSurfaceTextureAvailable" -> {
+                                    val texture = args?.getOrNull(0) as? SurfaceTexture
+                                    if (texture != null) {
+                                        textureStates[texture]?.let { state ->
+                                            state.targetSurface = try {
+                                                Surface(texture)
+                                            } catch (_: Throwable) {
+                                                null
+                                            }
+                                            scheduleRendererRetry(state)
+                                        }
+                                    }
+                                }
+                                "onSurfaceTextureDestroyed" -> {
+                                    val texture = args?.getOrNull(0) as? SurfaceTexture
+                                    if (texture != null) {
+                                        textureStates[texture]?.let { state ->
+                                            stopRenderer(state)
+                                            state.targetSurface = null
+                                        }
+                                    }
+                                }
+                            }
+                            invokeOn(listener, method, args)
+                        }
+                    }
+                },
+                "Camera1.textureView"
+            )
+        }
+
+        val holderClass = HookUtils.findClass("android.view.SurfaceView\$SurfaceViewHolder", loader)
+        if (holderClass != null) {
+            HookUtils.hookAllNamed(
+                holderClass,
+                listOf("addCallback", "removeCallback"),
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val callback = param.args.getOrNull(0) ?: return
+                        if (param.method.name == "addCallback") {
+                            val wrapper = globalCallbackWrappers.getOrPut(callback) {
+                                globalCallbackProxy(callback)
+                            }
+                            globalCallbackOriginals[wrapper] = callback
+                            param.args[0] = wrapper
+                        } else {
+                            param.args[0] = globalCallbackWrappers[callback] ?: callback
+                        }
+                    }
+                },
+                "Camera1.surfaceHolder"
+            )
+        }
+
         HookUtils.hookAllNamed(
             cameraClass,
             listOf("setPreviewTexture"),
@@ -154,6 +333,11 @@ object Camera1Hook {
                             s.ownedTargetSurface = null
                             s.originalTexture = null
                             s.targetSurface = null
+                            s.callbackWrappers.clear()
+                            val textures = textureStates.entries.iterator()
+                            while (textures.hasNext()) {
+                                if (textures.next().value === s) textures.remove()
+                            }
                         }
                         return
                     }
@@ -174,7 +358,9 @@ object Camera1Hook {
                     }
                     s.dummyTextureDrainer = drainer
                     s.dummyTexture = dummy
+                    textureStates[original] = s
                     param.args[0] = dummy
+                    scheduleRendererRetry(s)
                 }
             },
             "Camera1.texture"
@@ -196,6 +382,7 @@ object Camera1Hook {
                             s.dummySurfaceDrainer = null
                             s.originalSurface = null
                             s.targetSurface = null
+                            s.callbackWrappers.clear()
                         }
                         return
                     }
@@ -224,19 +411,35 @@ object Camera1Hook {
                     val dummy = Proxy.newProxyInstance(
                         SurfaceHolder::class.java.classLoader,
                         arrayOf(SurfaceHolder::class.java)
-                    ) { _, method, _ ->
+                    ) { _, method, args ->
                         when (method.name) {
                             "getSurface" -> dummySurface
-                            "getSurfaceFrame" -> Rect(0, 0, 1, 1)
-                            "addCallback", "removeCallback", "setFixedSize", "setSizeFromLayout",
-                            "setFormat", "setType", "setKeepScreenOn" -> null
-                            "isCreating" -> false
-                            "getFormat" -> 0
-                            "getType" -> 0
-                            else -> defaultValue(method.returnType)
+                            "getSurfaceFrame" -> try {
+                                holder.surfaceFrame
+                            } catch (_: Throwable) {
+                                Rect(0, 0, 1, 1)
+                            }
+                            "addCallback" -> {
+                                val callback = args?.getOrNull(0)
+                                val wrapped = if (callback != null) {
+                                    callbackProxy(s, callback).also {
+                                        s.callbackWrappers[callback] = it
+                                    }
+                                } else null
+                                invokeOn(holder, method, arrayOf(wrapped ?: callback))
+                            }
+                            "removeCallback" -> {
+                                val callback = args?.getOrNull(0)
+                                val wrapped = if (callback != null) {
+                                    s.callbackWrappers.remove(callback) ?: callback
+                                } else null
+                                invokeOn(holder, method, arrayOf(wrapped))
+                            }
+                            else -> invokeOn(holder, method, args)
                         }
                     }
                     param.args[0] = dummy
+                    scheduleRendererRetry(s)
                 }
             },
             "Camera1.display"
