@@ -20,7 +20,6 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -42,8 +41,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Android
-import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
@@ -60,9 +57,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.filled.RotateLeft
 import androidx.compose.material.icons.filled.RotateRight
-import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Security
-import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.ZoomIn
@@ -71,7 +66,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilledTonalButton
@@ -80,7 +74,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
@@ -110,7 +103,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.openvcam.core.AppConfig
 import com.openvcam.core.ConfigStore
-import com.openvcam.core.CoreKeepAliveService
 import com.openvcam.core.CropPresets
 import com.openvcam.core.SourceConfig
 import kotlinx.coroutines.Dispatchers
@@ -241,10 +233,7 @@ private fun MinimalScreen() {
     var root by remember { mutableStateOf(false) }
     var framework by remember { mutableStateOf("Checking…") }
     var hookActive by remember { mutableStateOf(false) }
-    val apps = remember { mutableStateOf(emptyList<AppEntry>()) }
-    var query by remember { mutableStateOf("") }
     var expandedEdit by remember { mutableStateOf(false) }
-    var expandedTargets by remember { mutableStateOf(false) }
 
     fun refresh() { version++ }
     fun apply(action: String, value: Any? = null) {
@@ -254,26 +243,21 @@ private fun MinimalScreen() {
     fun edit(block: AppConfig.() -> Unit) {
         store.update {
             block()
-            // The hook is only meaningful with both a feed and at least one app.
-            if (activeSource.type == "none" || targets.isEmpty()) enabled = false
+            // The hook is only meaningful with a feed; apps are scoped in LSPosed/Vector.
+            if (activeSource.type == "none") enabled = false
         }
         refresh()
     }
 
     LaunchedEffect(Unit) {
-        // A hook enabled before media/targets were chosen would blank the camera.
+        // A hook enabled before choosing media would blank the camera.
         val initial = store.config
-        if (initial.enabled && (initial.activeSource.type == "none" || initial.targets.isEmpty())) {
+        if (initial.enabled && initial.activeSource.type == "none") {
             store.update { enabled = false }
             refresh()
         }
         root = withContext(Dispatchers.IO) { hasRoot() }
         framework = withContext(Dispatchers.IO) { detectFramework(context) }
-    }
-    LaunchedEffect(expandedTargets) {
-        if (expandedTargets && apps.value.isEmpty()) {
-            apps.value = withContext(Dispatchers.IO) { UiUtils.installedApps(context) }
-        }
     }
     LaunchedEffect(Unit) {
         while (true) {
@@ -326,8 +310,7 @@ private fun MinimalScreen() {
                     root = root,
                     framework = framework,
                     hookActive = hookActive,
-                    scopeCount = cfg.targets.size,
-                    canEnable = cfg.activeSource.type != "none" && cfg.targets.isNotEmpty(),
+                    canEnable = cfg.activeSource.type != "none",
                     onToggle = { apply("toggleEnabled") },
                     onFixRoot = {
                         fixWithRoot(context) { ok, detected ->
@@ -358,20 +341,23 @@ private fun MinimalScreen() {
             }
 
             item {
-                TargetCard(
-                    cfg = cfg,
-                    apps = apps.value,
-                    query = query,
-                    onQuery = { query = it },
-                    expanded = expandedTargets,
-                    onExpand = { expandedTargets = !expandedTargets },
-                    onEdit = { block -> edit(block) }
+                ScopeCard(
+                    framework = framework,
+                    onOpen = {
+                        val intent = frameworkIntent(context)
+                        if (intent != null) context.startActivity(intent)
+                        else Toast.makeText(
+                            context,
+                            "Install LSPosed or Vector first",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
                 )
             }
 
             item {
                 Text(
-                    "Changes apply instantly. Keep OpenVCam and your target apps enabled in LSPosed/Vector.",
+                    "Select media, enable the hook, then force-stop and reopen the app you scoped in LSPosed/Vector.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
@@ -387,7 +373,6 @@ private fun HeroCard(
     root: Boolean,
     framework: String,
     hookActive: Boolean,
-    scopeCount: Int,
     canEnable: Boolean,
     onToggle: () -> Unit,
     onFixRoot: () -> Unit,
@@ -452,7 +437,7 @@ private fun HeroCard(
                 }
                 if (!enabled && !canEnable) {
                     Text(
-                        "Select media and at least one target app first",
+                        "Select an image or video first",
                         color = Color.White.copy(alpha = 0.85f),
                         style = MaterialTheme.typography.bodySmall
                     )
@@ -465,7 +450,6 @@ private fun HeroCard(
                     StatusChip("Root", root, Icons.Filled.Security)
                     StatusChip(framework, framework != "Not detected" && framework != "Checking…", Icons.Filled.Layers)
                     StatusChip(if (hookActive) "Hook live" else "Waiting", hookActive, Icons.Filled.Link)
-                    StatusChip("$scopeCount app${if (scopeCount == 1) "" else "s"}", scopeCount > 0, Icons.Filled.Apps)
                 }
 
                 if (!root || framework == "Not detected") {
@@ -698,25 +682,10 @@ private fun MiniIcon(icon: ImageVector, label: String, onClick: () -> Unit) {
 }
 
 @Composable
-private fun TargetCard(
-    cfg: AppConfig,
-    apps: List<AppEntry>,
-    query: String,
-    onQuery: (String) -> Unit,
-    expanded: Boolean,
-    onExpand: () -> Unit,
-    onEdit: (AppConfig.() -> Unit) -> Unit
-) {
-    val filtered = apps.filter {
-        it.label.contains(query, ignoreCase = true) ||
-            it.packageName.contains(query, ignoreCase = true)
-    }.take(80)
-    Card(Modifier.fillMaxWidth().animateContentSize()) {
+private fun ScopeCard(framework: String, onOpen: () -> Unit) {
+    Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Row(
-                Modifier.clickable(onClick = onExpand),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(
                     Modifier
                         .size(34.dp)
@@ -725,94 +694,29 @@ private fun TargetCard(
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
-                        Icons.Filled.Apps, null,
+                        Icons.Filled.Security, null,
                         tint = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.size(18.dp)
                     )
                 }
                 Spacer(Modifier.width(10.dp))
                 Column(Modifier.weight(1f)) {
-                    Text("Target apps", style = MaterialTheme.typography.titleSmall)
+                    Text("App scope", style = MaterialTheme.typography.titleSmall)
                     Text(
-                        if (cfg.targets.isEmpty()) "None selected" else "${cfg.targets.size} selected",
+                        if (framework == "Not detected") {
+                            "Install LSPosed or Vector, then enable this module"
+                        } else {
+                            "Enable OpenVCam and the app to hook in $framework"
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                Icon(
-                    Icons.Filled.KeyboardArrowDown,
-                    null,
-                    modifier = Modifier.rotate(if (expanded) 180f else 0f)
-                )
             }
-
-            AnimatedVisibility(visible = expanded) {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(
-                        value = query,
-                        onValueChange = onQuery,
-                        label = { Text("Search apps") },
-                        leadingIcon = { Icon(Icons.Filled.Search, null) },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(
-                            onClick = { onEdit { targets.addAll(apps.map { it.packageName }) } },
-                            modifier = Modifier.weight(1f)
-                        ) { Text("Select all") }
-                        OutlinedButton(
-                            onClick = { onEdit { targets.clear() } },
-                            modifier = Modifier.weight(1f)
-                        ) { Text("Clear") }
-                    }
-                    if (apps.isEmpty()) {
-                        Text(
-                            "Loading apps…",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(8.dp)
-                        )
-                    } else {
-                        LazyColumn(Modifier.height(260.dp).fillMaxWidth()) {
-                            items(filtered, key = { it.packageName }) { app ->
-                                val selected = cfg.targets.contains(app.packageName)
-                                Row(
-                                    Modifier
-                                        .fillMaxWidth()
-                                        .clickable {
-                                            onEdit {
-                                                if (targets.contains(app.packageName)) {
-                                                    targets.remove(app.packageName)
-                                                } else {
-                                                    targets.add(app.packageName)
-                                                }
-                                            }
-                                        }
-                                        .padding(vertical = 6.dp, horizontal = 4.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Icon(
-                                        Icons.Filled.Android, null,
-                                        modifier = Modifier.size(18.dp),
-                                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                    Spacer(Modifier.width(10.dp))
-                                    Column(Modifier.weight(1f)) {
-                                        Text(app.label, style = MaterialTheme.typography.bodyMedium)
-                                        Text(app.packageName, style = MaterialTheme.typography.labelSmall)
-                                    }
-                                    Checkbox(checked = selected, onCheckedChange = null)
-                                }
-                            }
-                        }
-                    }
-                    Text(
-                        "Also enable OpenVCam and these apps in LSPosed/Vector scope.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
+            Button(onClick = onOpen, modifier = Modifier.fillMaxWidth()) {
+                Icon(Icons.Filled.Layers, null, modifier = Modifier.size(17.dp))
+                Spacer(Modifier.width(6.dp))
+                Text(if (framework == "Not detected") "Open framework" else "Open $framework scope")
             }
         }
     }

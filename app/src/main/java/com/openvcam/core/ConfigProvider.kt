@@ -13,28 +13,26 @@ class ConfigProvider : ContentProvider() {
 
     override fun onCreate(): Boolean = true
 
-    /** Only OpenVCam itself or a package the user explicitly scoped may read config/media. */
-    private fun isTrustedCaller(): Boolean {
-        val ctx = context ?: return false
-        if (Binder.getCallingUid() == ctx.applicationInfo.uid) return true
-        val targets = ConfigStore.get(ctx).config.targets
-        val pkg = callingPackage
-        if (pkg != null && pkg in targets) return true
-        val uid = Binder.getCallingUid()
-        return targets.any { target ->
-            runCatching { ctx.packageManager.getApplicationInfo(target, 0).uid == uid }
-                .getOrDefault(false)
-        }
-    }
+    private fun isSelf(): Boolean =
+        Binder.getCallingUid() == context?.applicationInfo?.uid
 
+    /**
+     * Config and media are intentionally readable by any app the user scopes in
+     * LSPosed/Vector. Enforcing OpenVCam's helper target list here caused scoped
+     * apps to silently keep the real camera when they were not also ticked in
+     * this app. Actual scoping is controlled by the hooking framework.
+     */
     override fun call(method: String, arg: String?, extras: Bundle?): Bundle? {
-        if (!isTrustedCaller()) return Bundle()
         val store = ConfigStore.get(context ?: return null)
         return Bundle().apply {
             when (method) {
                 "getConfig" -> putString("json", store.snapshotJson())
                 "heartbeat" -> {
-                    store.recordHeartbeat(extras?.getString("package") ?: arg ?: "")
+                    val pkg = extras?.getString("package")
+                        ?: arg
+                        ?: callingPackage
+                        ?: ""
+                    store.recordHeartbeat(pkg)
                     putString("json", store.snapshotJson())
                 }
                 "getStatus" -> {
@@ -44,8 +42,8 @@ class ConfigProvider : ContentProvider() {
                     putString("json", store.snapshotJson())
                 }
                 "applyControl" -> {
-                    // Settings may only be changed from OpenVCam itself.
-                    if (Binder.getCallingUid() == context?.applicationInfo?.uid) {
+                    // Only OpenVCam itself may change settings.
+                    if (isSelf()) {
                         val action = extras?.getString("action") ?: ""
                         putString("json", store.applyControl(action, extras?.get("value")))
                     }
@@ -55,7 +53,6 @@ class ConfigProvider : ContentProvider() {
     }
 
     override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor? {
-        if (!isTrustedCaller()) return null
         val name = uri.lastPathSegment ?: return null
         if (name.contains("..") || name.contains("/")) return null
         val file = ConfigStore.get(context ?: return null).mediaFile(name)

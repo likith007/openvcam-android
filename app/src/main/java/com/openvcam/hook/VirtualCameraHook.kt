@@ -2,6 +2,7 @@ package com.openvcam.hook
 
 import android.app.Application
 import de.robv.android.xposed.IXposedHookLoadPackage
+import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.callbacks.XC_LoadPackage
 import de.robv.android.xposed.callbacks.XC_MethodHook
 import java.util.Collections
@@ -27,6 +28,7 @@ class VirtualCameraHook : IXposedHookLoadPackage {
             "OpenVCam.app"
         )
 
+        XposedBridge.log("[OpenVCam] module loaded in $packageName")
         installOnce(lpparam.classLoader)
     }
 
