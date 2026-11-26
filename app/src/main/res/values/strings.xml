@@ -1,0 +1,9 @@
+<resources>
+    <string name="app_name">OpenVCam</string>
+    <string name="notification_core_title">OpenVCam ready</string>
+    <string name="notification_core_text">Core service is running for faster controls</string>
+    <string name="notification_control_title">OpenVCam controls active</string>
+    <string name="notification_control_text">Tap the floating bubble to control the virtual camera</string>
+    <string name="channel_core">OpenVCam core</string>
+    <string name="channel_control">Virtual camera controls</string>
+</resources>
