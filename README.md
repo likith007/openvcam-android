@@ -12,7 +12,7 @@ and it contains **no login, licensing, or subscription code**.
 - Per-source rotation, mirror, and zoom
 - Global play/pause, speed, virtual/real switch, and audio mode
 - Camera1: preview callback NV21 injection, preview surface replacement, photo capture replacement
-- Camera2: session output redirection + GL preview rendering (basic/ordinary sessions)
+- Camera2: session output redirection + GL preview rendering (basic/ordinary sessions), JPEG still-image replacement
 - Floating draggable control bubble over other apps
 - Installed target-app list with remembered selections
 - Exported `ContentProvider` used by hooks to read the shared config and media
@@ -60,6 +60,5 @@ LSPosed/Vector at runtime, so no Xposed classes are packaged into the APK.
 - LSPosed module scope cannot be changed programmatically; the Targets list is a reminder helper.
 - Camera2 support focuses on ordinary `createCaptureSession` flows; complex reprocessing,
   physical multi-camera sessions, and `SessionConfiguration` sessions may not be replaced.
-- Camera2 still-image replacement is not implemented.
 - Compatibility varies by device, camera API, and target app. Test before relying on it.
 - Use only where you have permission to substitute the camera feed.

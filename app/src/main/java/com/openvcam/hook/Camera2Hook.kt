@@ -1,10 +1,14 @@
 package com.openvcam.hook
 
+import android.graphics.ImageFormat
 import android.graphics.SurfaceTexture
+import android.graphics.YuvImage
 import android.hardware.camera2.params.OutputConfiguration
+import android.media.Image
 import android.media.ImageReader
 import android.view.Surface
 import de.robv.android.xposed.callbacks.XC_MethodHook
+import java.io.ByteArrayOutputStream
 import java.util.Collections
 import java.util.IdentityHashMap
 import java.util.WeakHashMap
@@ -17,6 +21,7 @@ object Camera2Hook {
     private val dummyToOriginal = Collections.synchronizedMap(WeakHashMap<Surface, Surface>())
     private val dummyTextures = Collections.synchronizedList(mutableListOf<SurfaceTexture>())
     private val renderers = Collections.synchronizedList(mutableListOf<GLPreviewRenderer>())
+    @Volatile private var jpegDecoder: Nv21Decoder? = null
 
     private fun dummyFor(original: Surface): Surface {
         originalToDummy[original]?.let { return it }
@@ -42,6 +47,45 @@ object Camera2Hook {
         if (readerClass != null) {
             HookUtils.hookAllNamed(
                 readerClass, listOf("newInstance", "build"), readerHook, "Camera2.ImageReader"
+            )
+
+            val jpegHook = object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    val cfg = HookConfig.snapshot()
+                    if (!HookConfig.shouldReplace(cfg)) return
+                    val reader = param.thisObject as? ImageReader ?: return
+                    if (reader.imageFormat != ImageFormat.JPEG) return
+                    val image = param.result as? Image ?: return
+                    val context = HookConfig.context ?: return
+                    val decoder = jpegDecoder ?: Nv21Decoder(context).also { jpegDecoder = it }
+                    val source = HookConfig.activeSource(cfg)
+                    decoder.configure(source, cfg)
+
+                    val width = image.width
+                    val height = image.height
+                    val frame = decoder.frame(width, height)
+                    val bytes = if (frame != null) {
+                        encodeJpeg(frame, width, height)
+                    } else {
+                        encodeJpeg(ByteArray(width * height * 3 / 2) { 128.toByte() }, width, height)
+                    }
+                    if (bytes.isEmpty()) return
+                    runCatching {
+                        val plane = image.planes[0]
+                        val buffer = plane.buffer
+                        val count = minOf(bytes.size, buffer.capacity())
+                        buffer.position(0)
+                        buffer.limit(count)
+                        buffer.put(bytes, 0, count)
+                        buffer.position(0)
+                    }
+                }
+            }
+            HookUtils.hookAllNamed(
+                readerClass,
+                listOf("acquireLatestImage", "acquireNextImage"),
+                jpegHook,
+                "Camera2.jpeg"
             )
         }
 
@@ -153,5 +197,14 @@ object Camera2Hook {
         if (sessionClass != null) {
             HookUtils.hookAllNamed(sessionClass, listOf("close"), closeHook, "Camera2.sessionClose")
         }
+    }
+
+    private fun encodeJpeg(nv21: ByteArray, width: Int, height: Int): ByteArray = try {
+        val image = YuvImage(nv21, ImageFormat.NV21, width, height, null)
+        val out = ByteArrayOutputStream()
+        image.compressToJpeg(android.graphics.Rect(0, 0, width, height), 90, out)
+        out.toByteArray()
+    } catch (_: Throwable) {
+        ByteArray(0)
     }
 }
