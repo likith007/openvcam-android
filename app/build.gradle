@@ -78,5 +78,5 @@ dependencies {
     implementation 'androidx.compose.material:material-icons-extended:1.6.8'
 
     // Compile-only stubs; the real classes are supplied by LSPosed/Vector at runtime.
-    compileOnly files('libs/xposed-api-stub.jar')
+    compileOnly files('libs/xposed-api-stub.jar', 'libs/libxposed-api-101-stub.jar')
 }

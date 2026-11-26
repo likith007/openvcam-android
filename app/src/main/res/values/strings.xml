@@ -1,5 +1,6 @@
 <resources>
     <string name="app_name">OpenVCam</string>
+    <string name="xposed_description">Open-source virtual camera: replace Camera1/Camera2 feed in scoped apps with an image or video.</string>
     <string name="notification_core_title">OpenVCam ready</string>
     <string name="notification_core_text">Core service is running for faster controls</string>
     <string name="notification_control_title">OpenVCam controls active</string>

@@ -41,8 +41,11 @@ keyPassword=your_key_password
 Then run `gradle assembleRelease`. Both `keystore.properties` and `keys/` are gitignored so
 secrets are never committed. Without that file, release builds are unsigned.
 
-The Xposed API is compile-only (`app/libs/xposed-api-stub.jar`); the real API is supplied by
-LSPosed/Vector at runtime, so no Xposed classes are packaged into the APK.
+The Xposed APIs are compile-only (`app/libs/xposed-api-stub.jar` and
+`app/libs/libxposed-api-101-stub.jar`); the real APIs are supplied by LSPosed/Vector at runtime,
+so no Xposed classes are packaged into the APK. OpenVCam declares libxposed API 101
+(`META-INF/xposed/module.prop` + `META-INF/xposed/java_init.list`) for Vector, while keeping the
+legacy `xposedminversion=82` / `assets/xposed_init` entry for LSPosed compatibility.
 
 ## Install and use
 

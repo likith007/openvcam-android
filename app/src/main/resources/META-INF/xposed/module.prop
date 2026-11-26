@@ -1,0 +1,10 @@
+id=com.openvcam
+name=OpenVCam
+version=1.0
+versionCode=1
+description=Open-source virtual camera for scoped apps
+minApiVersion=101
+targetApiVersion=101
+staticScope=false
+exceptionMode=protective
+autoHotReload=false

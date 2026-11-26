@@ -196,55 +196,94 @@ private fun detectFramework(context: Context): String {
 /**
  * Vector's manager is often parasitic: there is no installed manager package to
  * find. Its system hook redirects any intent carrying the LAUNCH_MANAGER category
- * out of a host activity, so we can open the scope editor without seeing a
- * manager app at all.
+ * out of a host activity. This mirrors Vector's own shortcut construction; do not
+ * hard-code a host activity that may not be exported.
  */
 private fun vectorParasiticIntent(context: Context): Intent? {
     val host = "com.android.shell"
-    val activities = try {
-        context.packageManager.getPackageInfo(
-            host,
-            PackageManager.GET_ACTIVITIES
-        ).activities
-    } catch (_: Throwable) {
-        null
+    val pm = context.packageManager
+    var intent = pm.getLaunchIntentForPackage(host)
+    if (intent == null) {
+        val activities = try {
+            pm.getPackageInfo(host, PackageManager.GET_ACTIVITIES).activities
+        } catch (_: Throwable) {
+            null
+        }
+        val activity = activities?.firstOrNull { it.processName == it.packageName } ?: return null
+        intent = Intent(Intent.ACTION_MAIN)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            .setComponent(ComponentName(host, activity.name))
     }
-    val activityName = activities?.firstOrNull { it.processName == it.packageName }?.name
-        ?: "com.android.shell.BugreportWarningActivity"
-    val intent = Intent(Intent.ACTION_MAIN)
-        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        .setComponent(ComponentName(host, activityName))
     intent.categories?.clear()
     intent.addCategory("org.matrix.vector.manager.LAUNCH_MANAGER")
+    intent.setPackage(host)
     intent.data = Uri.parse("module://${context.packageName}:0")
-    return intent
+    return if (intent.resolveActivity(pm) != null) intent else null
 }
 
-private fun frameworkIntent(context: Context): Intent? {
-    // Standalone Vector manager, when it is installed as a normal app.
-    listOf("org.matrix.vector.manager").forEach { pkg ->
-        context.packageManager.getLaunchIntentForPackage(pkg)?.let { intent ->
-            intent.data = Uri.parse("module://${context.packageName}:0")
-            return intent
-        }
+private fun vectorManagerIntent(context: Context): Intent? {
+    val pkg = "org.matrix.vector.manager"
+    return context.packageManager.getLaunchIntentForPackage(pkg)?.apply {
+        data = Uri.parse("module://${context.packageName}:0")
+    }
+}
+
+private fun frameworkManagerIntent(context: Context, detected: String): Intent? {
+    // Follow what the status chip says. A parasitic Vector launch must never be
+    // attempted on a device that is actually using LSPosed, or the com.android.shell
+    // activity can reject the intent and crash the caller.
+    if (detected == "Vector") {
+        vectorManagerIntent(context)?.let { return it }
+        vectorParasiticIntent(context)?.let { return it }
+        return null
     }
 
-    // Vector in parasitic mode: no manager package exists.
-    vectorParasiticIntent(context)?.let { return it }
-
-    // LSPosed / LSPatch / Xposed manager packages.
-    frameworks.forEach { entry ->
-        if (entry.label == "Vector") return@forEach
+    frameworks.filter { it.label != "Vector" }.forEach { entry ->
         entry.packages.firstOrNull { packageInstalled(context, it) }?.let { pkg ->
             context.packageManager.getLaunchIntentForPackage(pkg)?.let { return it }
         }
     }
 
-    // Last resort: let a framework with a module:// deep link handle it.
-    val generic = Intent(Intent.ACTION_VIEW, Uri.parse("module://${context.packageName}:0"))
+    // Installed standalone Vector manager is still a safe fallback.
+    vectorManagerIntent(context)?.let { return it }
+
+    return moduleDeepLinkIntent(context)
+}
+
+private fun moduleDeepLinkIntent(context: Context): Intent? {
+    val intent = Intent(Intent.ACTION_VIEW, Uri.parse("module://${context.packageName}:0"))
         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-    if (generic.resolveActivity(context.packageManager) != null) return generic
-    return null
+    return if (intent.resolveActivity(context.packageManager) != null) intent else null
+}
+
+private fun openFramework(context: Context, framework: String) {
+    val candidates = listOfNotNull(
+        frameworkManagerIntent(context, framework),
+        moduleDeepLinkIntent(context)
+    )
+    if (candidates.isEmpty()) {
+        Toast.makeText(
+            context,
+            "Could not open $framework; open its manager manually",
+            Toast.LENGTH_SHORT
+        ).show()
+        return
+    }
+
+    var lastError: Throwable? = null
+    for (intent in candidates) {
+        try {
+            context.startActivity(intent)
+            return
+        } catch (t: Throwable) {
+            lastError = t
+        }
+    }
+    Toast.makeText(
+        context,
+        "Could not open $framework: ${lastError?.javaClass?.simpleName ?: "no resolvable manager"}",
+        Toast.LENGTH_LONG
+    ).show()
 }
 
 private fun fixWithRoot(context: Context, onDone: (Boolean, String) -> Unit) {
@@ -365,11 +404,7 @@ private fun MinimalScreen() {
                             framework = detected
                         }
                     },
-                    onOpenFramework = {
-                        val intent = frameworkIntent(context)
-                        if (intent != null) context.startActivity(intent)
-                        else Toast.makeText(context, "Could not open LSPosed/Vector; open the manager manually", Toast.LENGTH_SHORT).show()
-                    }
+                    onOpenFramework = { openFramework(context, framework) }
                 )
             }
 
@@ -390,15 +425,7 @@ private fun MinimalScreen() {
             item {
                 ScopeCard(
                     framework = framework,
-                    onOpen = {
-                        val intent = frameworkIntent(context)
-                        if (intent != null) context.startActivity(intent)
-                        else Toast.makeText(
-                            context,
-                            "Could not open LSPosed/Vector; open the manager manually",
-                            Toast.LENGTH_SHORT
-                        ).show()
-                    }
+                    onOpen = { openFramework(context, framework) }
                 )
             }
 
