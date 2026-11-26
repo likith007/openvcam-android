@@ -27,12 +27,14 @@ object HookUtils {
         method: Method?,
         callback: XC_MethodHook,
         tag: String
-    ) {
-        if (method == null) return
-        try {
+    ): Boolean {
+        if (method == null) return false
+        return try {
             XposedBridge.hookMethod(method, callback)
+            true
         } catch (t: Throwable) {
             XposedBridge.log("[OpenVCam] hook failed $tag: ${t.message}")
+            false
         }
     }
 
@@ -40,12 +42,14 @@ object HookUtils {
         constructor: Constructor<*>?,
         callback: XC_MethodHook,
         tag: String
-    ) {
-        if (constructor == null) return
-        try {
+    ): Boolean {
+        if (constructor == null) return false
+        return try {
             XposedBridge.hookMethod(constructor, callback)
+            true
         } catch (t: Throwable) {
             XposedBridge.log("[OpenVCam] hook failed $tag: ${t.message}")
+            false
         }
     }
 

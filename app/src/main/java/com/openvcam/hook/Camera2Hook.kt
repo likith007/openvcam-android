@@ -1,9 +1,13 @@
 package com.openvcam.hook
 
+import android.content.Context
+import android.graphics.ColorSpace
 import android.graphics.ImageFormat
 import android.graphics.SurfaceTexture
 import android.graphics.YuvImage
 import android.hardware.camera2.CameraCaptureSession
+import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.params.InputConfiguration
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
 import android.media.Image
@@ -14,11 +18,13 @@ import android.view.Surface
 import de.robv.android.xposed.callbacks.XC_MethodHook
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
+import java.lang.reflect.Method
 import java.lang.reflect.Modifier
 import java.lang.reflect.Proxy
 import java.util.Collections
 import java.util.IdentityHashMap
 import java.util.WeakHashMap
+import java.util.concurrent.Executor
 
 object Camera2Hook {
 
@@ -39,8 +45,17 @@ object Camera2Hook {
         Collections.newSetFromMap(Collections.synchronizedMap(WeakHashMap<Surface, Boolean>()))
     private val dummyByOriginal = Collections.synchronizedMap(WeakHashMap<Surface, Dummy>())
     private val originalByDummy = Collections.synchronizedMap(WeakHashMap<Surface, Surface>())
-    private val sessions = Collections.synchronizedMap(WeakHashMap<Any, SessionState>())
+
+    // One canonical set of states; the maps below are only lookup indexes.
+    private val states = Collections.newSetFromMap(
+        Collections.synchronizedMap(IdentityHashMap<SessionState, Boolean>())
+    )
+    private val devices = Collections.synchronizedMap(WeakHashMap<Any, SessionState>())
     private val sessionKeys = Collections.synchronizedMap(WeakHashMap<Any, SessionState>())
+
+    private val hookedMethods = Collections.newSetFromMap(
+        Collections.synchronizedMap(IdentityHashMap<Method, Boolean>())
+    )
     private val pending = ThreadLocal.withInitial { mutableListOf<Dummy>() }
     @Volatile private var jpegDecoder: Nv21Decoder? = null
     @Volatile private var syncRetryPending = false
@@ -76,10 +91,65 @@ object Camera2Hook {
         if (dummy.drainer != null) dummy.drainer.release() else runCatching { dummy.texture?.release() }
     }
 
+    private fun hookOnce(
+        method: Method,
+        callback: XC_MethodHook,
+        tag: String
+    ): Boolean {
+        if (!hookedMethods.add(method)) return false
+        return HookUtils.hook(method, callback, tag)
+    }
+
+    private fun hookAllNamedOnce(
+        clazz: Class<*>?,
+        names: Collection<String>,
+        callback: XC_MethodHook,
+        tag: String
+    ) {
+        if (clazz == null) return
+        HookUtils.declaredMethods(clazz).forEach { method ->
+            if (method.name in names) {
+                hookOnce(method, callback, "$tag.${method.name}")
+            }
+        }
+    }
+
+    private fun rollbackPending(since: Int) {
+        val collector = pending.get()
+        val created = collector.drop(since)
+        created.forEach { runCatching { releaseDummy(it) } }
+        while (collector.size > since) collector.removeAt(collector.lastIndex)
+    }
+
+    private val outputMetadataGetters = arrayOf(
+        "getPhysicalCameraId" to "setPhysicalCameraId",
+        "getStreamUseCase" to "setStreamUseCase",
+        "getTimestampBase" to "setTimestampBase",
+        "getDynamicRangeProfile" to "setDynamicRangeProfile",
+        "getSensorPixelModesUsed" to "setSensorPixelModesUsed",
+        "getColorSpace" to "setColorSpace",
+        "getMirrorMode" to "setMirrorMode",
+        "isReadoutTimestampEnabled" to "setReadoutTimestampEnabled",
+        "getMultiResolutionMode" to "setMultiResolutionMode"
+    )
+
+    private val safeOutputFields = setOf(
+        "mPhysicalCameraId",
+        "mStreamUseCase",
+        "mTimestampBase",
+        "mDynamicRangeProfile",
+        "mSensorPixelModesUsed",
+        "mColorSpace",
+        "mMirrorMode",
+        "mReadoutTimestampEnabled",
+        "mMultiResolutionMode",
+        "mSurfaceSharingId"
+    )
+
     /**
-     * Builds a replacement OutputConfiguration that keeps CameraX's stream sharing,
-     * physical camera id, stream use case, timestamp base, dynamic range and sensor
-     * pixel mode metadata. Only the Surfaces are swapped for our dummy surfaces.
+     * Builds a replacement OutputConfiguration that keeps CameraX's stream-sharing and
+     * vendor metadata without copying surface-derived size/format/generation values.
+     * Those values belong to the dummy surfaces, not to the original camera surfaces.
      */
     private fun copyOutputConfiguration(
         original: OutputConfiguration,
@@ -88,34 +158,22 @@ object Camera2Hook {
         val copy = OutputConfiguration(replacements.first())
         replacements.drop(1).forEach { runCatching { copy.addSurface(it) } }
 
-        var surfaceIndex = 0
+        outputMetadataGetters.forEach { (getterName, setterName) ->
+            runCatching {
+                val getter = original.javaClass.getMethod(getterName)
+                val value = getter.invoke(original) ?: return@runCatching
+                val setter = copy.javaClass.getMethod(setterName, getter.returnType)
+                setter.invoke(copy, value)
+            }
+        }
+
         var clazz: Class<*>? = original.javaClass
         while (clazz != null && clazz != Any::class.java) {
             clazz.declaredFields.forEach { field ->
-                if (Modifier.isStatic(field.modifiers)) return@forEach
-                try {
+                if (field.name !in safeOutputFields || Modifier.isStatic(field.modifiers)) return@forEach
+                runCatching {
                     field.isAccessible = true
-                    when (val value = field.get(original)) {
-                        // The constructor already owns the replacement surface field(s).
-                        is Surface -> Unit
-                        is List<*> -> {
-                            val copied = ArrayList<Any?>(value.size)
-                            value.forEach { item ->
-                                if (item is Surface) {
-                                    if (surfaceIndex < replacements.size) {
-                                        copied.add(replacements[surfaceIndex++])
-                                    } else {
-                                        copied.add(item)
-                                    }
-                                } else {
-                                    copied.add(item)
-                                }
-                            }
-                            field.set(copy, copied)
-                        }
-                        else -> field.set(copy, value)
-                    }
-                } catch (_: Throwable) {
+                    field.set(copy, field.get(original))
                 }
             }
             clazz = clazz.superclass
@@ -197,15 +255,53 @@ object Camera2Hook {
         }
     }
 
-    /** Keeps the original SessionConfiguration so CameraX extras are preserved. */
+    /**
+     * Builds a real replacement SessionConfiguration. Returning the original object after
+     * computing dummy outputs would leave CameraX writing to the same surfaces our renderer
+     * draws into, which causes black/flickering previews.
+     */
     private fun replaceSessionConfiguration(config: Any): Any? {
+        val before = pending.get().size
         return try {
-            val outputs = config.javaClass.getMethod("getOutputConfigurations")
-                .invoke(config) as? List<*> ?: return null
+            val clazz = config.javaClass
+            val outputs = clazz.getMethod("getOutputConfigurations").invoke(config) as? List<*>
+                ?: run {
+                    rollbackPending(before)
+                    return null
+                }
             val replaced = replaceOutputs(outputs)
-            if (replaced.any { it !is OutputConfiguration }) return null
-            config
+            if (replaced.any { it !is OutputConfiguration }) {
+                rollbackPending(before)
+                return null
+            }
+
+            @Suppress("UNCHECKED_CAST")
+            val newOutputs = replaced as List<OutputConfiguration>
+            val sessionType = clazz.getMethod("getSessionType").invoke(config) as Int
+            val executor = clazz.getMethod("getExecutor").invoke(config) as Executor
+            val callback = clazz.getMethod("getStateCallback").invoke(config) as
+                CameraCaptureSession.StateCallback
+            val copy = SessionConfiguration(sessionType, newOutputs, executor, callback)
+
+            runCatching {
+                (clazz.getMethod("getInputConfiguration").invoke(config) as? InputConfiguration)
+                    ?.let { copy.setInputConfiguration(it) }
+            }
+            runCatching {
+                (clazz.getMethod("getSessionParameters").invoke(config) as? CaptureRequest)
+                    ?.let { copy.setSessionParameters(it) }
+            }
+            runCatching {
+                val colorSpace = clazz.getMethod("getColorSpace").invoke(config) as? ColorSpace
+                if (colorSpace != null) {
+                    SessionConfiguration::class.java
+                        .getMethod("setColorSpace", ColorSpace::class.java)
+                        .invoke(copy, colorSpace)
+                }
+            }
+            copy
         } catch (_: Throwable) {
+            rollbackPending(before)
             null
         }
     }
@@ -261,12 +357,13 @@ object Camera2Hook {
         val cfg = HookConfig.snapshot()
         if (!HookConfig.shouldReplace(cfg)) return
         val context = HookConfig.context ?: return
-        val existing = sessions.values.firstOrNull {
+        val existing = states.firstOrNull {
             !it.disposed && it.device === device && it.dummies == dummies
         }
         val state = existing ?: SessionState(device).also { created ->
             created.dummies.addAll(dummies)
-            sessions[device] = created
+            states.add(created)
+            devices[device] = created
             dummies.forEach { dummy ->
                 if (!dummy.original.isValid) return@forEach
                 val renderer = GLPreviewRenderer(context, dummy.original)
@@ -278,15 +375,15 @@ object Camera2Hook {
                 "Camera2 renderer started for ${created.dummies.size} output(s)"
             )
         }
-        if (session != null) {
-            sessions[session] = state
-            sessionKeys[session] = state
-        }
+        if (session != null) sessionKeys[session] = state
     }
 
     private fun unregisterState(session: Any) {
-        val state = sessionKeys.remove(session) ?: sessions.remove(session)
-        if (state != null) disposeState(state, session)
+        val state = sessionKeys.remove(session) ?: return
+        devices.entries.toList().forEach { (key, value) ->
+            if (value === state) devices.remove(key)
+        }
+        disposeState(state)
     }
 
     private fun stopRenderers(state: SessionState) {
@@ -294,18 +391,15 @@ object Camera2Hook {
         state.renderers.clear()
     }
 
-    private fun disposeState(state: SessionState, key: Any? = null) {
+    private fun disposeState(state: SessionState) {
         synchronized(state) {
             if (state.disposed) return
             state.disposed = true
         }
+        states.remove(state)
         stopRenderers(state)
         state.dummies.forEach { releaseDummy(it) }
         state.dummies.clear()
-        if (key != null) {
-            sessions.remove(key)
-            sessionKeys.remove(key)
-        }
     }
 
     private fun scheduleConfigSync(attempts: Int = 16) {
@@ -315,7 +409,7 @@ object Camera2Hook {
             syncRetryPending = false
             val cfg = HookConfig.snapshot()
             syncRenderers(cfg)
-            val waiting = sessions.values.any { state ->
+            val waiting = states.any { state ->
                 !state.disposed && HookConfig.shouldReplace(cfg) && state.renderers.isEmpty()
             }
             if (waiting && attempts > 1) scheduleConfigSync(attempts - 1)
@@ -330,7 +424,7 @@ object Camera2Hook {
             HookConfig.typeOf(source).let { it == "video" || it == "image" }
         } ?: false
         var needsRetry = false
-        sessions.values.toList().forEach { state ->
+        states.toList().forEach { state ->
             if (state.disposed) return@forEach
             if (!shouldReplace || !usable) {
                 stopRenderers(state)
@@ -439,15 +533,19 @@ object Camera2Hook {
             }
         }
 
-        methods.forEach { HookUtils.hook(it, callback, "Camera2.internalSession") }
+        val installedCount = methods.count { hookOnce(it, callback, "Camera2.internalSession") }
+        if (installedCount == 0) return
         internalSessionHooked = true
-        HookLog.once("c2.internal-install", "Camera2 internal session hook installed")
+        HookLog.once(
+            "c2.internal-install",
+            "Camera2 internal session hook installed on $installedCount method(s)"
+        )
     }
 
     fun install(loader: ClassLoader) {
         val readerClass = HookUtils.findClass("android.media.ImageReader", loader)
         if (readerClass != null) {
-            HookUtils.hookAllNamed(
+            hookAllNamedOnce(
                 readerClass, listOf("newInstance", "build"),
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
@@ -458,7 +556,7 @@ object Camera2Hook {
                 "Camera2.ImageReader"
             )
 
-            HookUtils.hookAllNamed(
+            hookAllNamedOnce(
                 readerClass, listOf("acquireLatestImage", "acquireNextImage"),
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
@@ -479,7 +577,7 @@ object Camera2Hook {
 
         val managerClass = HookUtils.findClass("android.hardware.camera2.CameraManager", loader)
         if (managerClass != null) {
-            HookUtils.hookAllNamed(
+            hookAllNamedOnce(
                 managerClass, listOf("openCamera"),
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
@@ -535,7 +633,7 @@ object Camera2Hook {
         // The internal hook also sees calls made through the public overloads, so
         // skip the public hook when it is available to avoid duplicate renderers.
         if (!internalSessionHooked) {
-            HookUtils.hookAllNamed(
+            hookAllNamedOnce(
                 deviceClass,
                 listOf(
                     "createCaptureSession",
@@ -553,7 +651,7 @@ object Camera2Hook {
             "android.hardware.camera2.CaptureRequest\$Builder", loader
         )
         if (builderClass != null) {
-            HookUtils.hookAllNamed(
+            hookAllNamedOnce(
                 builderClass, listOf("addTarget"),
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
@@ -565,7 +663,7 @@ object Camera2Hook {
                 },
                 "Camera2.addTarget"
             )
-            HookUtils.hookAllNamed(
+            hookAllNamedOnce(
                 builderClass, listOf("build"),
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
@@ -576,14 +674,14 @@ object Camera2Hook {
             )
         }
 
-        HookUtils.hookAllNamed(
+        hookAllNamedOnce(
             deviceClass, listOf("close"),
             object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     val device = param.thisObject
-                    sessions.entries.toList().forEach { (key, state) ->
+                    devices.entries.toList().forEach { (key, state) ->
                         if (state.device === device) {
-                            sessions.remove(key)
+                            devices.remove(key)
                             disposeState(state)
                         }
                     }
@@ -600,30 +698,37 @@ object Camera2Hook {
             "Camera2.deviceClose"
         )
 
-        val sessionClass = HookUtils.findClass(
-            "android.hardware.camera2.CameraCaptureSession", loader
-        )
-        if (sessionClass != null) {
-            HookUtils.hookAllNamed(
-                sessionClass, listOf("close"),
-                object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        unregisterState(param.thisObject)
-                    }
-                },
+        val closeCallback = object : XC_MethodHook() {
+            override fun beforeHookedMethod(param: MethodHookParam) {
+                unregisterState(param.thisObject)
+            }
+        }
+        // Preview requests repeat constantly; use them to apply live config changes
+        // and recover a renderer whose surface became valid late.
+        val syncCallback = object : XC_MethodHook() {
+            override fun afterHookedMethod(param: MethodHookParam) {
+                syncRenderers(HookConfig.snapshot())
+            }
+        }
+
+        val sessionClasses = listOf(
+            "android.hardware.camera2.impl.CameraCaptureSessionImpl",
+            "android.hardware.camera2.impl.CameraConstrainedHighSpeedCaptureSessionImpl",
+            "android.hardware.camera2.impl.CameraOfflineSessionImpl",
+            "android.hardware.camera2.CameraCaptureSession"
+        ).mapNotNull { HookUtils.findClass(it, loader) }
+
+        sessionClasses.forEach { sessionClass ->
+            hookAllNamedOnce(
+                sessionClass,
+                listOf("close"),
+                closeCallback,
                 "Camera2.sessionClose"
             )
-
-            // Preview requests repeat constantly; use them to apply live config changes
-            // and recover a renderer whose surface became valid late.
-            HookUtils.hookAllNamed(
+            hookAllNamedOnce(
                 sessionClass,
                 listOf("setRepeatingRequest", "capture", "captureBurst", "setRepeatingBurst"),
-                object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        syncRenderers(HookConfig.snapshot())
-                    }
-                },
+                syncCallback,
                 "Camera2.sync"
             )
         }

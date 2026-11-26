@@ -1,6 +1,7 @@
 package com.openvcam.hook
 
 import android.app.Application
+import android.content.Context
 import de.robv.android.xposed.IXposedHookLoadPackage
 import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.callbacks.XC_LoadPackage
@@ -18,7 +19,10 @@ class VirtualCameraHook : IXposedHookLoadPackage {
 
     companion object {
 
-        private val installed = Collections.synchronizedSet(
+        private val installedTargets = Collections.synchronizedSet(
+            Collections.newSetFromMap(IdentityHashMap<Pair<String, ClassLoader>, Boolean>())
+        )
+        private val installedLoaders = Collections.synchronizedSet(
             Collections.newSetFromMap(IdentityHashMap<ClassLoader, Boolean>())
         )
 
@@ -26,6 +30,7 @@ class VirtualCameraHook : IXposedHookLoadPackage {
         @JvmStatic
         fun handlePackage(packageName: String, loader: ClassLoader) {
             if (packageName == "android") return
+            if (!installedTargets.add(packageName to loader)) return
 
             val instrumentation = HookUtils.findClass("android.app.Instrumentation", loader)
 
@@ -47,11 +52,27 @@ class VirtualCameraHook : IXposedHookLoadPackage {
                 return
             }
 
+            // Application.attach is the earliest reliable point with a Context. Apps that
+            // open a camera from Application.onCreate() would otherwise be missed.
+            val applicationClass = HookUtils.findClass("android.app.Application", loader)
+            HookUtils.hookAllNamed(
+                applicationClass,
+                listOf("attach"),
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val context = param.args.getOrNull(0) as? Context ?: return
+                        HookConfig.context = context.applicationContext
+                        installOnce(loader)
+                    }
+                },
+                "OpenVCam.attach"
+            )
+
             HookUtils.hookAllNamed(
                 instrumentation,
                 listOf("callApplicationOnCreate"),
                 object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
                         val app = param.args.getOrNull(0) as? Application ?: return
                         HookConfig.context = app.applicationContext
                         installOnce(loader)
@@ -65,8 +86,8 @@ class VirtualCameraHook : IXposedHookLoadPackage {
         }
 
         private fun installOnce(loader: ClassLoader) {
-            synchronized(installed) {
-                if (!installed.add(loader)) return
+            synchronized(installedLoaders) {
+                if (!installedLoaders.add(loader)) return
             }
             runCatching { SurfaceSizeTracker.install(loader) }
                 .onFailure { HookLog.error("surface-size-tracker", it) }
