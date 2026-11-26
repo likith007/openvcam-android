@@ -28,10 +28,14 @@ class ConfigProvider : ContentProvider() {
             when (method) {
                 "getConfig" -> putString("json", store.snapshotJson())
                 "heartbeat" -> {
-                    val pkg = extras?.getString("package")
-                        ?: arg
-                        ?: callingPackage
-                        ?: ""
+                    // The provider is exported. Only OpenVCam itself may attribute a
+                    // heartbeat to another package; external callers are recorded as
+                    // themselves so arbitrary apps cannot fake an active hook.
+                    val pkg = if (isSelf()) {
+                        extras?.getString("package") ?: arg ?: callingPackage ?: ""
+                    } else {
+                        callingPackage ?: ""
+                    }
                     store.recordHeartbeat(pkg)
                     putString("json", store.snapshotJson())
                 }

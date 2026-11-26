@@ -109,6 +109,7 @@ import com.openvcam.core.SourceConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 class MainActivity : ComponentActivity() {
@@ -135,9 +136,9 @@ class MainActivity : ComponentActivity() {
 private data class FrameworkEntry(val packages: List<String>, val label: String)
 
 private val frameworks = listOf(
+    FrameworkEntry(listOf("org.matrix.vector.manager"), "Vector"),
     FrameworkEntry(listOf("org.lsposed.manager", "com.lsposed.manager"), "LSPosed"),
     FrameworkEntry(listOf("org.lsposed.lspatch", "com.lsposed.lspatch"), "LSPatch"),
-    FrameworkEntry(listOf("org.matrix.vector.manager"), "Vector"),
     FrameworkEntry(listOf("de.robv.android.xposed.installer"), "Xposed"),
     FrameworkEntry(listOf("org.meowcat.edxposed.manager"), "EdXposed"),
     FrameworkEntry(listOf("com.topjohnwu.magisk"), "Magisk"),
@@ -148,13 +149,28 @@ private val frameworks = listOf(
 private fun uriFor(path: String): Uri? =
     path.takeIf { it.isNotEmpty() }?.let { Uri.parse("content://com.openvcam.provider/media/$it") }
 
-private fun shell(command: String, seconds: Long = 3L): String = try {
-    val process = Runtime.getRuntime().exec(arrayOf("su", "-c", command))
-    val output = process.inputStream.bufferedReader().readText()
-    process.waitFor(seconds, TimeUnit.SECONDS)
-    output
-} catch (_: Throwable) {
-    ""
+private fun shell(command: String, seconds: Long = 3L): String {
+    val process = try {
+        ProcessBuilder("su", "-c", command)
+            .redirectErrorStream(true)
+            .start()
+    } catch (_: Throwable) {
+        return ""
+    }
+    val executor = Executors.newSingleThreadExecutor()
+    return try {
+        runCatching { process.outputStream.close() }
+        val output = executor.submit<String> {
+            process.inputStream.bufferedReader().use { it.readText() }
+        }
+        val finished = process.waitFor(seconds, TimeUnit.SECONDS)
+        if (!finished) process.destroyForcibly()
+        runCatching { output.get(1L, TimeUnit.SECONDS) }.getOrDefault("")
+    } catch (_: Throwable) {
+        ""
+    } finally {
+        executor.shutdownNow()
+    }
 }
 
 private fun hasRoot(): Boolean = shell("id", 2L).contains("uid=0")
@@ -228,26 +244,40 @@ private fun vectorManagerIntent(context: Context): Intent? {
     }
 }
 
-private fun frameworkManagerIntent(context: Context, detected: String): Intent? {
-    // Follow what the status chip says. A parasitic Vector launch must never be
-    // attempted on a device that is actually using LSPosed, or the com.android.shell
-    // activity can reject the intent and crash the caller.
-    if (detected == "Vector") {
-        vectorManagerIntent(context)?.let { return it }
-        vectorParasiticIntent(context)?.let { return it }
-        return null
-    }
-
-    frameworks.filter { it.label != "Vector" }.forEach { entry ->
-        entry.packages.firstOrNull { packageInstalled(context, it) }?.let { pkg ->
+private fun managerIntentForLabel(context: Context, label: String): Intent? {
+    if (label == "Vector") return vectorManagerIntent(context)
+    frameworks.firstOrNull { it.label == label }?.packages?.forEach { pkg ->
+        if (packageInstalled(context, pkg)) {
             context.packageManager.getLaunchIntentForPackage(pkg)?.let { return it }
         }
     }
+    return null
+}
 
-    // Installed standalone Vector manager is still a safe fallback.
-    vectorManagerIntent(context)?.let { return it }
+/**
+ * Detection can be ambiguous: Vector is often parasitic and LSPosed files may still be
+ * present. Try the reported framework first, then the other installed managers. The
+ * com.android.shell parasitic path is only attempted when Vector was explicitly detected,
+ * so it can never replace a working LSPosed manager.
+ */
+private fun frameworkCandidates(context: Context, detected: String): List<Intent> {
+    val labels = when (detected) {
+        "Vector" -> listOf("Vector", "LSPosed", "LSPatch", "Xposed", "EdXposed")
+        "LSPosed" -> listOf("LSPosed", "LSPatch", "Xposed", "EdXposed", "Vector")
+        "LSPatch" -> listOf("LSPatch", "LSPosed", "Xposed", "EdXposed", "Vector")
+        "Xposed", "EdXposed" -> listOf(detected, "LSPosed", "LSPatch", "Vector")
+        else -> listOf("LSPosed", "LSPatch", "Vector", "Xposed", "EdXposed")
+    }
 
-    return moduleDeepLinkIntent(context)
+    val result = mutableListOf<Intent>()
+    labels.forEach { label ->
+        managerIntentForLabel(context, label)?.let { result.add(it) }
+        if (label == "Vector" && detected == "Vector") {
+            vectorParasiticIntent(context)?.let { result.add(it) }
+        }
+    }
+    moduleDeepLinkIntent(context)?.let { result.add(it) }
+    return result.distinctBy { it.toUri(0) }
 }
 
 private fun moduleDeepLinkIntent(context: Context): Intent? {
@@ -257,10 +287,7 @@ private fun moduleDeepLinkIntent(context: Context): Intent? {
 }
 
 private fun openFramework(context: Context, framework: String) {
-    val candidates = listOfNotNull(
-        frameworkManagerIntent(context, framework),
-        moduleDeepLinkIntent(context)
-    )
+    val candidates = frameworkCandidates(context, framework)
     if (candidates.isEmpty()) {
         Toast.makeText(
             context,
