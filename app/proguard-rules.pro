@@ -1,0 +1,3 @@
+-keep class com.openvcam.hook.** { *; }
+-keep class com.openvcam.core.ConfigProvider { *; }
+-keep class de.robv.android.xposed.** { *; }

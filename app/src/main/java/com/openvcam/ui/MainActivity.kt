@@ -3,6 +3,7 @@ package com.openvcam.ui
 import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -47,6 +48,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -55,7 +57,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.ui.unit.dp
 import com.openvcam.core.ConfigStore
 import com.openvcam.core.CoreKeepAliveService
@@ -63,6 +68,9 @@ import com.openvcam.core.FloatingControlService
 import com.openvcam.core.SourceConfig
 
 class MainActivity : ComponentActivity() {
+    private val requestNotifications =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
@@ -71,6 +79,16 @@ class MainActivity : ComponentActivity() {
                     AppRoot()
                 }
             }
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            requestNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
 }
@@ -86,6 +104,18 @@ private fun AppRoot() {
     val store = ConfigStore.get(context)
     var version by remember { mutableIntStateOf(0) }
     var tab by remember { mutableStateOf(Tab.HOME) }
+    var overlayGranted by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
+
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                overlayGranted = Settings.canDrawOverlays(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     @Suppress("UNUSED_VARIABLE")
     val cfg = run {
@@ -140,10 +170,12 @@ private fun AppRoot() {
     ) { padding ->
         Box(Modifier.padding(padding).fillMaxSize()) {
             when (tab) {
-                Tab.HOME -> HomeScreen(cfg, store, ::apply, { i, u, t -> import(i, u, t) }, version)
+                Tab.HOME -> HomeScreen(
+                    cfg, store, ::apply, { i, u, t -> import(i, u, t) }, version, overlayGranted
+                )
                 Tab.PRESETS -> PresetsScreen(cfg, store, ::apply, { i, u, t -> import(i, u, t) }, version)
                 Tab.TARGETS -> TargetsScreen(cfg, store, version)
-                Tab.CONTROLS -> ControlsScreen(cfg, context, ::apply, version)
+                Tab.CONTROLS -> ControlsScreen(cfg, context, ::apply, version, overlayGranted)
             }
         }
     }
@@ -155,7 +187,8 @@ private fun HomeScreen(
     store: ConfigStore,
     apply: (String, Any?) -> Unit,
     import: (Int, Uri?, String) -> Unit,
-    version: Int
+    version: Int,
+    overlayGranted: Boolean
 ) {
     val context = LocalContext.current
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) {
@@ -169,6 +202,8 @@ private fun HomeScreen(
         modifier = Modifier.fillMaxSize().padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        item { PermissionCard(overlayGranted, context) }
+
         item { SectionTitle("Main source") }
         item {
             SourceCard(
@@ -265,6 +300,42 @@ private fun HomeScreen(
             }
         }
         item { Spacer(Modifier.height(24.dp)) }
+    }
+}
+
+@Composable
+private fun PermissionCard(overlayGranted: Boolean, context: Context) {
+    val notificationsGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
+    } else true
+
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Permissions", style = MaterialTheme.typography.titleSmall)
+            Text(
+                if (overlayGranted) "✓ Overlay access granted" else "⚠ Overlay access needed for floating controls",
+                style = MaterialTheme.typography.bodySmall,
+                color = if (overlayGranted) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.error
+            )
+            Text(
+                if (notificationsGranted) "✓ Notifications allowed" else "⚠ Notifications needed for background services",
+                style = MaterialTheme.typography.bodySmall,
+                color = if (notificationsGranted) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.error
+            )
+            if (!overlayGranted) {
+                Button(onClick = {
+                    context.startActivity(
+                        Intent(
+                            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                            Uri.parse("package:${context.packageName}")
+                        )
+                    )
+                }) { Text("Grant overlay access") }
+            }
+        }
     }
 }
 
@@ -461,7 +532,8 @@ private fun ControlsScreen(
     cfg: com.openvcam.core.AppConfig,
     context: Context,
     apply: (String, Any?) -> Unit,
-    version: Int
+    version: Int,
+    overlayGranted: Boolean
 ) {
     Column(
         modifier = Modifier
@@ -470,6 +542,8 @@ private fun ControlsScreen(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        PermissionCard(overlayGranted, context)
+
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text("Feed controls", style = MaterialTheme.typography.titleMedium)

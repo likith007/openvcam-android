@@ -26,7 +26,21 @@ export PATH=/data/data/com.termux/files/home/gradle-8.7/bin:$JAVA_HOME/bin:$PATH
 gradle assembleDebug --no-daemon
 ```
 
-Output: `app/build/outputs/apk/debug/app-debug.apk`
+Outputs:
+- Debug: `app/build/outputs/apk/debug/app-debug.apk`
+- Release: `app/build/outputs/apk/release/app-release.apk`
+
+For a release build with your own key, create `keystore.properties` in the project root:
+
+```properties
+storeFile=/absolute/path/to/your/release.jks
+storePassword=your_store_password
+keyAlias=your_alias
+keyPassword=your_key_password
+```
+
+Then run `gradle assembleRelease`. Both `keystore.properties` and `keys/` are gitignored so
+secrets are never committed. Without that file, release builds are unsigned.
 
 The Xposed API is compile-only (`app/libs/xposed-api-stub.jar`); the real API is supplied by
 LSPosed/Vector at runtime, so no Xposed classes are packaged into the APK.
@@ -34,11 +48,12 @@ LSPosed/Vector at runtime, so no Xposed classes are packaged into the APK.
 ## Install and use
 
 1. Install the APK on a rooted device running Android 9+ (API 28+).
-2. Install LSPosed or Vector and enable the **OpenVCam** module.
-3. In the module scope, select the apps whose camera you want to replace.
-4. Open OpenVCam, pick an image/video for **Main** and/or presets.
-5. Force-stop and reopen each target app.
-6. Use the Controls tab or floating bubble to switch presets and adjust rotation/mirror/zoom/speed.
+2. On first launch, allow notifications (Android 13+) and grant "Display over other apps" from the Permissions card for floating controls.
+3. Install LSPosed or Vector and enable the **OpenVCam** module.
+4. In the module scope, select the apps whose camera you want to replace.
+5. Open OpenVCam, pick an image/video for **Main** and/or presets.
+6. Force-stop and reopen each target app.
+7. Use the Controls tab or floating bubble to switch presets and adjust rotation/mirror/zoom/speed.
 
 ## Known limitations
 
