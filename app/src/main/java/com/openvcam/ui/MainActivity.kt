@@ -10,15 +10,14 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.provider.Settings
 import android.widget.Toast
 import android.widget.VideoView
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -38,22 +37,22 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Android
 import androidx.compose.material.icons.filled.Apps
-import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.CameraAlt
-import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Crop
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Flip
-import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Pause
@@ -63,13 +62,13 @@ import androidx.compose.material.icons.filled.RotateLeft
 import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Security
-import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.ZoomIn
 import androidx.compose.material.icons.filled.ZoomOut
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
@@ -78,16 +77,13 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
@@ -103,7 +99,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
@@ -117,7 +112,6 @@ import com.openvcam.core.AppConfig
 import com.openvcam.core.ConfigStore
 import com.openvcam.core.CoreKeepAliveService
 import com.openvcam.core.CropPresets
-import com.openvcam.core.FloatingControlService
 import com.openvcam.core.SourceConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -125,12 +119,13 @@ import kotlinx.coroutines.withContext
 import java.util.concurrent.TimeUnit
 
 class MainActivity : ComponentActivity() {
+
     private val requestNotifications =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { SimpleScreen() }
+        setContent { MinimalScreen() }
     }
 
     override fun onStart() {
@@ -144,89 +139,112 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+private data class FrameworkEntry(val packages: List<String>, val label: String)
+
+private val frameworks = listOf(
+    FrameworkEntry(listOf("org.lsposed.manager", "com.lsposed.manager"), "LSPosed"),
+    FrameworkEntry(listOf("org.lsposed.lspatch", "com.lsposed.lspatch"), "LSPatch"),
+    FrameworkEntry(listOf("com.vector.manager", "org.vector.manager"), "Vector"),
+    FrameworkEntry(listOf("de.robv.android.xposed.installer"), "Xposed"),
+    FrameworkEntry(listOf("org.meowcat.edxposed.manager"), "EdXposed"),
+    FrameworkEntry(listOf("com.topjohnwu.magisk"), "Magisk"),
+    FrameworkEntry(listOf("me.weishu.kernelsu", "com.kernelsu.manager"), "KernelSU"),
+    FrameworkEntry(listOf("com.apatch.app", "com.apatch.manager"), "APatch")
+)
+
 private fun uriFor(path: String): Uri? =
     path.takeIf { it.isNotEmpty() }?.let { Uri.parse("content://com.openvcam.provider/media/$it") }
 
-private fun hasRoot(): Boolean = try {
-    val process = Runtime.getRuntime().exec(arrayOf("su", "-c", "id"))
+private fun shell(command: String, seconds: Long = 3L): String = try {
+    val process = Runtime.getRuntime().exec(arrayOf("su", "-c", command))
     val output = process.inputStream.bufferedReader().readText()
-    process.waitFor(3, TimeUnit.SECONDS)
-    output.contains("uid=0")
+    process.waitFor(seconds, TimeUnit.SECONDS)
+    output
+} catch (_: Throwable) {
+    ""
+}
+
+private fun hasRoot(): Boolean = shell("id", 2L).contains("uid=0")
+
+private fun packageInstalled(context: Context, name: String): Boolean = try {
+    context.packageManager.getPackageInfo(name, 0)
+    true
 } catch (_: Throwable) {
     false
 }
 
-private fun frameworkPackages(): List<Pair<String, String>> = listOf(
-    "org.lsposed.manager" to "LSPosed",
-    "com.lsposed.manager" to "LSPosed",
-    "org.lsposed.lspatch" to "LSPatch",
-    "de.robv.android.xposed.installer" to "Xposed",
-    "org.meowcat.edxposed.manager" to "EdXposed"
-)
-
-private fun frameworkName(context: Context): String {
-    frameworkPackages().forEach { (pkg, label) ->
-        if (runCatching { context.packageManager.getPackageInfo(pkg, 0); true }.getOrDefault(false)) {
-            return label
-        }
+private fun detectFramework(context: Context): String {
+    frameworks.forEach { entry ->
+        if (entry.packages.any { packageInstalled(context, it) }) return entry.label
     }
-    return "Not detected"
+
+    val output = shell(
+        "pm list packages | grep -Ei 'lsposed|lspatch|xposed|vector'; " +
+            "test -d /data/adb/lspd && echo lsposed; " +
+            "test -d /data/adb/apatch && echo apatch; " +
+            "test -d /data/adb/ksu && echo kernelsu; " +
+            "ls /data/adb/modules 2>/dev/null | grep -Ei 'lsposed|xposed|vector'",
+        2L
+    ).lowercase()
+
+    return when {
+        output.contains("lsposed") -> "LSPosed"
+        output.contains("vector") -> "Vector"
+        output.contains("lspatch") -> "LSPatch"
+        output.contains("xposed") -> "Xposed"
+        output.contains("apatch") -> "APatch"
+        output.contains("kernelsu") -> "KernelSU"
+        output.contains("magisk") -> "Magisk"
+        else -> "Not detected"
+    }
 }
 
-private fun frameworkPackage(context: Context): String? =
-    frameworkPackages().firstOrNull { (pkg, _) ->
-        runCatching { context.packageManager.getPackageInfo(pkg, 0); true }.getOrDefault(false)
-    }?.first
-
-private fun grantWithRoot(context: Context) {
-    Thread {
-        var granted = 0
-        val pkg = context.packageName
-        arrayOf(
-            "pm grant $pkg android.permission.SYSTEM_ALERT_WINDOW",
-            "pm grant $pkg android.permission.POST_NOTIFICATIONS",
-            "pm grant $pkg android.permission.FOREGROUND_SERVICE_SPECIAL_USE",
-            "am start-foreground-service -n $pkg/$pkg.core.CoreKeepAliveService",
-            "am start-foreground-service -n $pkg/$pkg.core.FloatingControlService"
-        ).forEach { command ->
-            try {
-                val process = Runtime.getRuntime().exec(arrayOf("su", "-c", command))
-                process.waitFor(5, TimeUnit.SECONDS)
-                if (command.startsWith("pm grant")) granted++
-            } catch (_: Throwable) {
-            }
+private fun frameworkIntent(context: Context): Intent? {
+    frameworks.forEach { entry ->
+        entry.packages.firstOrNull { packageInstalled(context, it) }?.let { pkg ->
+            context.packageManager.getLaunchIntentForPackage(pkg)?.let { return it }
         }
+    }
+    return null
+}
+
+private fun fixWithRoot(context: Context, onDone: (Boolean, String) -> Unit) {
+    Thread {
+        val pkg = context.packageName
+        shell(
+            "pm grant $pkg android.permission.POST_NOTIFICATIONS; " +
+                "pm grant $pkg android.permission.FOREGROUND_SERVICE_SPECIAL_USE; " +
+                "am start-foreground-service -n $pkg/$pkg.core.CoreKeepAliveService",
+            5L
+        )
+        val ok = hasRoot()
+        val detected = if (ok) detectFramework(context) else "Not detected"
         Handler(Looper.getMainLooper()).post {
             Toast.makeText(
                 context,
-                if (granted > 0) "Root access active ($granted permissions granted)"
-                else "Root access failed — grant su to OpenVCam",
+                if (ok) "Root access active" else "Root access failed — allow su for OpenVCam",
                 Toast.LENGTH_SHORT
             ).show()
+            onDone(ok, detected)
         }
     }.start()
 }
 
-private enum class NavTab(val label: String, val icon: ImageVector) {
-    HOME("Home", Icons.Filled.Home),
-    MEDIA("Media", Icons.Filled.Image),
-    TARGETS("Targets", Icons.Filled.Apps),
-    SETTINGS("Settings", Icons.Filled.Settings)
-}
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SimpleScreen() {
+private fun MinimalScreen() {
     val context = LocalContext.current
     val store = ConfigStore.get(context)
     var version by remember { mutableIntStateOf(0) }
-    var tab by remember { mutableStateOf(NavTab.HOME) }
-    val cfg = store.config
+    val cfg = remember(version) { store.config }
 
-    var activeIndex by remember { mutableIntStateOf(cfg.activeIndex) }
-    val rootAvailable = remember { mutableStateOf(false) }
-    val framework = remember { frameworkName(context) }
-    val hookActive = store.anyHookActive()
+    var root by remember { mutableStateOf(false) }
+    var framework by remember { mutableStateOf("Checking…") }
+    var hookActive by remember { mutableStateOf(false) }
+    val apps = remember { mutableStateOf(emptyList<AppEntry>()) }
+    var query by remember { mutableStateOf("") }
+    var expandedEdit by remember { mutableStateOf(false) }
+    var expandedTargets by remember { mutableStateOf(false) }
 
     fun refresh() { version++ }
     fun apply(action: String, value: Any? = null) {
@@ -237,611 +255,268 @@ private fun SimpleScreen() {
         store.update(block)
         refresh()
     }
-    fun onFixRoot() {
-        grantWithRoot(context)
-        rootAvailable.value = hasRoot()
-        refresh()
-    }
 
     LaunchedEffect(Unit) {
-        rootAvailable.value = withContext(Dispatchers.IO) { hasRoot() }
+        root = withContext(Dispatchers.IO) { hasRoot() }
+        framework = withContext(Dispatchers.IO) { detectFramework(context) }
+        apps.value = withContext(Dispatchers.IO) { UiUtils.installedApps(context) }
     }
     LaunchedEffect(Unit) {
         while (true) {
-            delay(4000L)
-            refresh()
-        }
-    }
-    LaunchedEffect(version) { activeIndex = store.config.activeIndex }
-
-    OpenVCamTheme(theme = cfg.theme) {
-        Scaffold(
-            containerColor = MaterialTheme.colorScheme.background,
-            topBar = {
-                TopAppBar(
-                    title = {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Box(
-                                Modifier
-                                    .size(30.dp)
-                                    .clip(RoundedCornerShape(9.dp))
-                                    .background(MaterialTheme.colorScheme.primary),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Icon(
-                                    Icons.Filled.CameraAlt, null,
-                                    tint = Color.White,
-                                    modifier = Modifier.size(17.dp)
-                                )
-                            }
-                            Spacer(Modifier.width(10.dp))
-                            Text("OpenVCam", fontWeight = FontWeight.Bold)
-                        }
-                    }
-                )
-            },
-            bottomBar = {
-                NavigationBar {
-                    NavTab.entries.forEach { item ->
-                        NavigationBarItem(
-                            selected = tab == item,
-                            onClick = { tab = item },
-                            icon = { Icon(item.icon, null) },
-                            label = { Text(item.label) },
-                            alwaysShowLabel = true
-                        )
-                    }
-                }
-            }
-        ) { padding ->
-            LazyColumn(
-                modifier = Modifier.padding(padding).fillMaxSize(),
-                contentPadding = PaddingValues(16.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp)
-            ) {
-                item {
-                    when (tab) {
-                        NavTab.HOME -> HomeTab(
-                            cfg,
-                            store,
-                            { action, value -> apply(action, value) },
-                            version,
-                            rootAvailable.value,
-                            framework,
-                            hookActive,
-                            { onFixRoot() }
-                        ) { tab = NavTab.MEDIA }
-                        NavTab.MEDIA -> MediaTab(
-                            context,
-                            cfg,
-                            activeIndex,
-                            { block -> edit(block) },
-                            { action, value -> apply(action, value) },
-                            version,
-                            onSelect = { index -> activeIndex = index; apply("preset", index) }
-                        )
-                        NavTab.TARGETS -> TargetsTab(
-                            cfg,
-                            store,
-                            { block -> edit(block) },
-                            frameworkPackage(context)
-                        )
-                        NavTab.SETTINGS -> SettingsTab(
-                            context,
-                            cfg,
-                            { action, value -> apply(action, value) },
-                            rootAvailable.value,
-                            framework,
-                            hookActive,
-                            { onFixRoot() }
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun SectionHeader(title: String, icon: ImageVector) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Icon(icon, null, modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
-        Spacer(Modifier.width(8.dp))
-        Text(title, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
-    }
-}
-
-@Composable
-private fun HomeTab(
-    cfg: AppConfig,
-    store: ConfigStore,
-    apply: (String, Any?) -> Unit,
-    version: Int,
-    root: Boolean,
-    framework: String,
-    hookActive: Boolean,
-    onFix: () -> Unit,
-    onOpenMedia: () -> Unit
-) {
-    HeroBanner(
-        enabled = cfg.enabled,
-        root = root,
-        framework = framework,
-        hookActive = hookActive,
-        scopeCount = cfg.targets.size,
-        onToggle = { apply("toggleEnabled", null) }
-    )
-
-    SetupBanner(root, framework, hookActive, onFix)
-
-    SectionHeader("Current feed", Icons.Filled.PlayArrow)
-    Card(
-        Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onOpenMedia)
-            .animateContentSize()
-    ) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            val source = cfg.sources.getOrElse(cfg.activeIndex) { SourceConfig() }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                    Modifier
-                        .size(40.dp)
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(MaterialTheme.colorScheme.primaryContainer),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        if (source.type == "video") Icons.Filled.Videocam else Icons.Filled.Image,
-                        null,
-                        tint = MaterialTheme.colorScheme.primary
-                    )
-                }
-                Spacer(Modifier.width(12.dp))
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        cfg.presetNames.getOrElse(cfg.activeIndex) { "Source ${cfg.activeIndex}" },
-                        style = MaterialTheme.typography.titleSmall
-                    )
-                    Text(
-                        if (source.type == "none") "No media selected"
-                        else source.name,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                Icon(Icons.Filled.CameraAlt, null, tint = MaterialTheme.colorScheme.primary)
-            }
-            MediaPreview(LocalContext.current, source, compact = true)
+            delay(6_000L)
+            hookActive = store.anyHookActive()
         }
     }
 
-    SectionHeader("Quick controls", Icons.Filled.Tune)
-    ControlCard(LocalContext.current, apply)
-
-    InfoBanner("Enable OpenVCam in LSPosed/Vector, scope your target apps, then force-stop and reopen them.")
-}
-
-@Composable
-private fun MediaTab(
-    context: Context,
-    cfg: AppConfig,
-    activeIndex: Int,
-    onEdit: (AppConfig.() -> Unit) -> Unit,
-    onApply: (String, Any?) -> Unit,
-    version: Int,
-    onSelect: (Int) -> Unit
-) {
-    SectionHeader("Media source", Icons.Filled.Image)
-    SourceTabs(activeIndex, cfg, onSelect)
-    val source = cfg.sources.getOrElse(activeIndex) { SourceConfig() }
-    MediaCard(context, activeIndex, source, onEdit, onApply, version)
-    InfoBanner("Crop, rotate, mirror and zoom are applied to both the live preview and the injected camera feed.")
-}
-
-@Composable
-private fun TargetsTab(
-    cfg: AppConfig,
-    store: ConfigStore,
-    onEdit: (AppConfig.() -> Unit) -> Unit,
-    frameworkPkg: String?
-) {
-    val context = LocalContext.current
-    val apps = remember { UiUtils.installedApps(context) }
-    var query by remember { mutableStateOf("") }
-    val filtered = apps.filter {
-        it.label.contains(query, ignoreCase = true) || it.packageName.contains(query, ignoreCase = true)
+    val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        UiUtils.importMedia(context, uri ?: return@rememberLauncherForActivityResult, "image")
+            ?.let { source -> edit { sources[cfg.activeIndex] = source } }
     }
-    val hooked = cfg.targets.count { store.isHookActive(it) }
+    val videoPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        UiUtils.importMedia(context, uri ?: return@rememberLauncherForActivityResult, "video")
+            ?.let { source -> edit { sources[cfg.activeIndex] = source } }
+    }
 
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Filled.Apps, null, tint = MaterialTheme.colorScheme.primary)
-                Spacer(Modifier.width(12.dp))
-                Column(Modifier.weight(1f)) {
-                    Text("${cfg.targets.size} selected", style = MaterialTheme.typography.titleSmall)
-                    Text(
-                        "$hooked currently hooked",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+    Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
+        topBar = {
+            TopAppBar(title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        Modifier
+                            .size(28.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(MaterialTheme.colorScheme.primary),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            Icons.Filled.CameraAlt, null,
+                            tint = Color.White,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                    Spacer(Modifier.width(10.dp))
+                    Text("OpenVCam", fontWeight = FontWeight.Bold)
                 }
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(
-                    onClick = { onEdit { targets.addAll(apps.map { it.packageName }) } },
-                    modifier = Modifier.weight(1f)
-                ) { Text("Select all") }
-                OutlinedButton(
-                    onClick = { onEdit { targets.clear() } },
-                    modifier = Modifier.weight(1f)
-                ) { Text("Clear all") }
-            }
-            if (frameworkPkg != null) {
-                FilledTonalButton(
-                    onClick = {
-                        runCatching {
-                            context.startActivity(context.packageManager.getLaunchIntentForPackage(frameworkPkg))
+            })
+        }
+    ) { padding ->
+        LazyColumn(
+            modifier = Modifier.padding(padding).fillMaxSize(),
+            contentPadding = PaddingValues(14.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            item {
+                HeroCard(
+                    enabled = cfg.enabled,
+                    root = root,
+                    framework = framework,
+                    hookActive = hookActive,
+                    scopeCount = cfg.targets.size,
+                    onToggle = { apply("toggleEnabled") },
+                    onFixRoot = {
+                        fixWithRoot(context) { ok, detected ->
+                            root = ok
+                            framework = detected
                         }
                     },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Icon(Icons.Filled.Security, null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Text("Open hooking framework")
-                }
-            }
-        }
-    }
-
-    OutlinedTextField(
-        value = query,
-        onValueChange = { query = it },
-        label = { Text("Search apps") },
-        leadingIcon = { Icon(Icons.Filled.Search, null) },
-        singleLine = true,
-        modifier = Modifier.fillMaxWidth()
-    )
-
-    Card(Modifier.fillMaxWidth()) {
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .height(420.dp)
-                .verticalScroll(rememberScrollState())
-                .padding(8.dp)
-        ) {
-            filtered.forEach { app ->
-                val selected = cfg.targets.contains(app.packageName)
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .clickable {
-                            onEdit {
-                                if (targets.contains(app.packageName)) targets.remove(app.packageName)
-                                else targets.add(app.packageName)
-                            }
-                        }
-                        .padding(vertical = 7.dp, horizontal = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        Icons.Filled.Android, null,
-                        modifier = Modifier.size(20.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(Modifier.width(12.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text(app.label, style = MaterialTheme.typography.bodyMedium)
-                        Text(app.packageName, style = MaterialTheme.typography.labelSmall)
+                    onOpenFramework = {
+                        val intent = frameworkIntent(context)
+                        if (intent != null) context.startActivity(intent)
+                        else Toast.makeText(context, "Install LSPosed or Vector first", Toast.LENGTH_SHORT).show()
                     }
-                    if (store.isHookActive(app.packageName)) {
-                        Text("●", color = Color(0xFF16A34A), modifier = Modifier.padding(end = 8.dp))
-                    }
-                    Checkbox(checked = selected, onCheckedChange = null)
-                }
+                )
             }
-        }
-    }
-    InfoBanner("Scope must also be enabled inside LSPosed/Vector. This list remembers your selection.")
-}
 
-@Composable
-private fun SettingsTab(
-    context: Context,
-    cfg: AppConfig,
-    apply: (String, Any?) -> Unit,
-    root: Boolean,
-    framework: String,
-    hookActive: Boolean,
-    onFix: () -> Unit
-) {
-    SectionHeader("Appearance", Icons.Filled.Settings)
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text("Theme", style = MaterialTheme.typography.titleSmall)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf("system", "light", "dark").forEach { mode ->
-                    FilterChip(
-                        selected = cfg.theme == mode,
-                        onClick = { apply("setTheme", mode) },
-                        label = {
-                            Text(
-                                when (mode) {
-                                    "system" -> "System"
-                                    "light" -> "Light"
-                                    else -> "Dark Pro"
-                                }
-                            )
-                        }
-                    )
-                }
+            item {
+                MediaCard(
+                    context = context,
+                    cfg = cfg,
+                    index = cfg.activeIndex,
+                    onEdit = { block -> edit(block) },
+                    onApply = { action, value -> apply(action, value) },
+                    expanded = expandedEdit,
+                    onExpand = { expandedEdit = !expandedEdit },
+                    onPickImage = { imagePicker.launch("image/*") },
+                    onPickVideo = { videoPicker.launch("video/*") }
+                )
             }
-        }
-    }
 
-    SectionHeader("Environment", Icons.Filled.Security)
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            StatusRow("Root access", if (root) "Granted" else "Not available", root)
-            StatusRow("Framework", framework, framework != "Not detected")
-            StatusRow("Hook integration", if (hookActive) "Active" else "Waiting", hookActive)
-            StatusRow("Selected scopes", "${cfg.targets.size} app(s)", cfg.targets.isNotEmpty())
-            if (!root || framework == "Not detected") {
-                Spacer(Modifier.height(4.dp))
-                FilledTonalButton(onClick = onFix, modifier = Modifier.fillMaxWidth()) {
-                    Text("Fix with root")
-                }
+            item {
+                TargetCard(
+                    cfg = cfg,
+                    apps = apps.value,
+                    query = query,
+                    onQuery = { query = it },
+                    expanded = expandedTargets,
+                    onExpand = { expandedTargets = !expandedTargets },
+                    onEdit = { block -> edit(block) }
+                )
             }
-        }
-    }
 
-    SectionHeader("Feed options", Icons.Filled.Tune)
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text("Audio", style = MaterialTheme.typography.labelMedium)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf("off", "video").forEach { mode ->
-                    FilterChip(
-                        selected = cfg.audioMode == mode,
-                        onClick = { apply("audio", mode) },
-                        label = { Text(if (mode == "off") "Muted" else "Video audio") }
-                    )
-                }
-            }
-            Text("Speed  " + "%.2f".format(cfg.speed) + "x", style = MaterialTheme.typography.labelMedium)
-            Slider(
-                value = cfg.speed,
-                onValueChange = { apply("setSpeed", it) },
-                valueRange = 0.25f..4f
-            )
-            if (cfg.sources.getOrElse(cfg.activeIndex) { SourceConfig() }.type == "video") {
+            item {
                 Text(
-                    "Seek  " + (cfg.positionMs / 1000f) + "s",
-                    style = MaterialTheme.typography.labelMedium
-                )
-                Slider(
-                    value = cfg.positionMs.coerceAtMost(60_000L).toFloat(),
-                    onValueChange = { apply("seek", it.toLong()) },
-                    valueRange = 0f..60_000f
+                    "Changes apply instantly. Keep OpenVCam and your target apps enabled in LSPosed/Vector.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
                 )
             }
         }
     }
-
-    SectionHeader("Services", Icons.Filled.Build)
-    ControlCard(context, apply)
-
-    SectionHeader("About", Icons.Filled.Info)
-    Card(Modifier.fillMaxWidth()) {
-        Text(
-            "OpenVCam is an independent open-source virtual camera module. No proprietary code, assets or licence checks are used. Use only where you have permission to substitute the camera feed.",
-            style = MaterialTheme.typography.bodySmall,
-            modifier = Modifier.padding(16.dp)
-        )
-    }
 }
 
 @Composable
-private fun StatusRow(label: String, value: String, ok: Boolean) {
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Icon(
-            if (ok) Icons.Filled.CheckCircle else Icons.Filled.Warning,
-            null,
-            modifier = Modifier.size(16.dp),
-            tint = if (ok) Color(0xFF16A34A) else MaterialTheme.colorScheme.error
-        )
-        Spacer(Modifier.width(10.dp))
-        Text(label, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
-        Text(value, style = MaterialTheme.typography.bodySmall)
-    }
-}
-
-@Composable
-private fun HeroBanner(
+private fun HeroCard(
     enabled: Boolean,
     root: Boolean,
     framework: String,
     hookActive: Boolean,
     scopeCount: Int,
-    onToggle: () -> Unit
+    onToggle: () -> Unit,
+    onFixRoot: () -> Unit,
+    onOpenFramework: () -> Unit
 ) {
-    val colors = listOf(
-        MaterialTheme.colorScheme.primary,
-        MaterialTheme.colorScheme.secondary,
-        MaterialTheme.colorScheme.tertiary
-    )
-    Box(
-        Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(24.dp))
-            .background(Brush.linearGradient(colors))
-            .padding(20.dp)
+    val primary = MaterialTheme.colorScheme.primary
+    Card(
+        Modifier.fillMaxWidth().animateContentSize(),
+        colors = CardDefaults.cardColors(containerColor = Color.Transparent)
     ) {
-        Column(verticalArrangement = Arrangement.spacedBy(18.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                    Modifier
-                        .size(44.dp)
-                        .clip(CircleShape)
-                        .background(Color.White.copy(alpha = 0.18f)),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(Icons.Filled.CameraAlt, null, tint = Color.White, modifier = Modifier.size(24.dp))
-                }
-                Spacer(Modifier.width(12.dp))
-                Column(Modifier.weight(1f)) {
-                    Text("Virtual Camera", color = Color.White, style = MaterialTheme.typography.titleLarge)
-                    Text(
-                        if (enabled) "Feed is being replaced" else "Real camera active",
-                        color = Color.White.copy(alpha = 0.8f),
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                }
-                Switch(
-                    checked = enabled,
-                    onCheckedChange = { onToggle() },
-                    colors = SwitchDefaults.colors(
-                        checkedThumbColor = MaterialTheme.colorScheme.primary,
-                        checkedTrackColor = Color.White,
-                        uncheckedThumbColor = Color.White,
-                        uncheckedTrackColor = Color.White.copy(alpha = 0.35f)
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(22.dp))
+                .background(
+                    Brush.linearGradient(
+                        listOf(
+                            MaterialTheme.colorScheme.primary,
+                            MaterialTheme.colorScheme.secondary,
+                            MaterialTheme.colorScheme.tertiary
+                        )
                     )
                 )
-            }
-            Row(
-                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                StatusPill("Root", root, Icons.Filled.Security)
-                StatusPill(framework, framework != "Not detected", Icons.Filled.Layers)
-                StatusPill("Hook", hookActive, Icons.Filled.Link)
-                StatusPill("$scopeCount scopes", scopeCount > 0, Icons.Filled.Apps)
+                .padding(16.dp)
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        if (enabled) Icons.Filled.Check else Icons.Filled.Close,
+                        null,
+                        tint = Color.White,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            if (enabled) "Hook enabled" else "Hook disabled",
+                            color = Color.White,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            if (enabled) "Virtual feed is active" else "Real camera is active",
+                            color = Color.White.copy(alpha = 0.8f),
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+
+                Button(
+                    onClick = onToggle,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color.White,
+                        contentColor = primary
+                    )
+                ) {
+                    Text(if (enabled) "Disable hook" else "Enable hook", fontWeight = FontWeight.Bold)
+                }
+
+                Row(
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    StatusChip("Root", root, Icons.Filled.Security)
+                    StatusChip(framework, framework != "Not detected" && framework != "Checking…", Icons.Filled.Layers)
+                    StatusChip(if (hookActive) "Hook live" else "Waiting", hookActive, Icons.Filled.Link)
+                    StatusChip("$scopeCount app${if (scopeCount == 1) "" else "s"}", scopeCount > 0, Icons.Filled.Apps)
+                }
+
+                if (!root || framework == "Not detected") {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            Icons.Filled.Warning,
+                            null,
+                            tint = Color.White,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            if (!root) "Root access not granted" else "Hooking framework not detected",
+                            color = Color.White,
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.weight(1f)
+                        )
+                        FilledTonalButton(
+                            onClick = if (!root) onFixRoot else onOpenFramework,
+                            colors = ButtonDefaults.filledTonalButtonColors(
+                                containerColor = Color.White,
+                                contentColor = primary
+                            )
+                        ) {
+                            Text(if (!root) "Fix root" else if (framework == "Checking…") "Check" else "Open")
+                        }
+                    }
+                }
             }
         }
     }
 }
 
 @Composable
-private fun StatusPill(text: String, ok: Boolean, icon: ImageVector) {
+private fun StatusChip(text: String, ok: Boolean, icon: ImageVector) {
     Surface(
-        color = Color.White.copy(alpha = if (ok) 0.24f else 0.10f),
+        color = Color.White.copy(alpha = if (ok) 0.25f else 0.12f),
         contentColor = Color.White,
         shape = CircleShape
     ) {
         Row(
-            Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+            Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Icon(icon, null, modifier = Modifier.size(14.dp))
-            Spacer(Modifier.width(6.dp))
-            Text(text, style = MaterialTheme.typography.labelMedium)
-            Spacer(Modifier.width(6.dp))
+            Icon(icon, null, modifier = Modifier.size(13.dp))
+            Spacer(Modifier.width(5.dp))
+            Text(text, style = MaterialTheme.typography.labelSmall)
+            Spacer(Modifier.width(5.dp))
             Text(if (ok) "●" else "○", style = MaterialTheme.typography.labelSmall)
         }
     }
 }
 
-@Composable
-private fun SetupBanner(root: Boolean, framework: String, hookActive: Boolean, onFix: () -> Unit) {
-    val needsFix = !root || framework == "Not detected"
-    AnimatedVisibility(visible = needsFix || !hookActive) {
-        Card(
-            Modifier.fillMaxWidth().animateContentSize(),
-            colors = CardDefaults.cardColors(
-                containerColor = if (needsFix) MaterialTheme.colorScheme.errorContainer
-                else MaterialTheme.colorScheme.primaryContainer
-            )
-        ) {
-            Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    if (needsFix) Icons.Filled.Warning else Icons.Filled.Info,
-                    null,
-                    tint = if (needsFix) MaterialTheme.colorScheme.error
-                    else MaterialTheme.colorScheme.primary
-                )
-                Spacer(Modifier.width(12.dp))
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        if (!root) "Root access not detected"
-                        else if (framework == "Not detected") "Hooking framework not detected"
-                        else "Waiting for a hooked app",
-                        style = MaterialTheme.typography.titleSmall
-                    )
-                    Text(
-                        if (needsFix) "Grant su access and required permissions."
-                        else "Open a scoped app to activate the hook.",
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                }
-                if (needsFix) FilledTonalButton(onClick = onFix) { Text("Fix") }
-            }
-        }
-    }
-}
-
-@Composable
-private fun InfoBanner(text: String) {
-    Card(
-        Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-    ) {
-        Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-            Icon(Icons.Filled.Info, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
-            Spacer(Modifier.width(12.dp))
-            Text(text, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
-        }
-    }
-}
-
-@Composable
-private fun SourceTabs(activeIndex: Int, cfg: AppConfig, onSelect: (Int) -> Unit) {
-    Row(
-        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        cfg.presetNames.forEachIndexed { index, _ ->
-            FilterChip(
-                selected = activeIndex == index,
-                onClick = { onSelect(index) },
-                leadingIcon = {
-                    Icon(
-                        if (index == 0) Icons.Filled.CameraAlt else Icons.Filled.Layers,
-                        null,
-                        modifier = Modifier.size(15.dp)
-                    )
-                },
-                label = { Text(if (index == 0) "Main" else "Preset $index") }
-            )
-        }
-    }
-}
-
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun MediaCard(
     context: Context,
+    cfg: AppConfig,
     index: Int,
-    source: SourceConfig,
     onEdit: (AppConfig.() -> Unit) -> Unit,
     onApply: (String, Any?) -> Unit,
-    version: Int
+    expanded: Boolean,
+    onExpand: () -> Unit,
+    onPickImage: () -> Unit,
+    onPickVideo: () -> Unit
 ) {
-    val imagePicker = androidx.activity.compose.rememberLauncherForActivityResult(
-        ActivityResultContracts.GetContent()
-    ) { uri -> import(context, uri, "image")?.let { s -> onEdit { sources[index] = s } } }
-
-    val videoPicker = androidx.activity.compose.rememberLauncherForActivityResult(
-        ActivityResultContracts.GetContent()
-    ) { uri -> import(context, uri, "video")?.let { s -> onEdit { sources[index] = s } } }
-
+    val source = cfg.sources.getOrElse(index) { SourceConfig() }
     Card(Modifier.fillMaxWidth().animateContentSize()) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(
                     Modifier
-                        .size(38.dp)
-                        .clip(RoundedCornerShape(12.dp))
+                        .size(34.dp)
+                        .clip(RoundedCornerShape(10.dp))
                         .background(MaterialTheme.colorScheme.primaryContainer),
                     contentAlignment = Alignment.Center
                 ) {
@@ -849,10 +524,10 @@ private fun MediaCard(
                         if (source.type == "video") Icons.Filled.Videocam else Icons.Filled.Image,
                         null,
                         tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(20.dp)
+                        modifier = Modifier.size(18.dp)
                     )
                 }
-                Spacer(Modifier.width(12.dp))
+                Spacer(Modifier.width(10.dp))
                 Column(Modifier.weight(1f)) {
                     Text(
                         if (source.type == "none") "No media selected" else source.name,
@@ -861,110 +536,121 @@ private fun MediaCard(
                     )
                     Text(
                         if (source.type == "none") "Choose an image or video"
-                        else source.type.uppercase() + " · " + CropPresets.label(source.crop) + " · " + source.rotation + "°",
+                        else source.type.uppercase() + " · " + CropPresets.label(source.crop),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
                 if (source.type != "none") {
-                    androidx.compose.material3.IconButton(
-                        onClick = { onEdit { sources[index] = SourceConfig() } }
-                    ) {
-                        Icon(Icons.Filled.Delete, "Clear media", tint = MaterialTheme.colorScheme.error)
+                    IconButton(onClick = { onEdit { sources[index] = SourceConfig() } }) {
+                        Icon(Icons.Filled.Delete, "Clear", tint = MaterialTheme.colorScheme.error)
                     }
                 }
             }
 
             MediaPreview(context, source)
 
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                FilledTonalButton(
-                    onClick = { imagePicker.launch("image/*") },
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Icon(Icons.Filled.Image, null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilledTonalButton(onClick = onPickImage, modifier = Modifier.weight(1f)) {
+                    Icon(Icons.Filled.Image, null, modifier = Modifier.size(17.dp))
+                    Spacer(Modifier.width(6.dp))
                     Text("Image")
                 }
-                FilledTonalButton(
-                    onClick = { videoPicker.launch("video/*") },
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Icon(Icons.Filled.Videocam, null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(8.dp))
+                FilledTonalButton(onClick = onPickVideo, modifier = Modifier.weight(1f)) {
+                    Icon(Icons.Filled.Videocam, null, modifier = Modifier.size(17.dp))
+                    Spacer(Modifier.width(6.dp))
                     Text("Video")
                 }
             }
 
-            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
-
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            OutlinedButton(onClick = onExpand, modifier = Modifier.fillMaxWidth()) {
                 Icon(
-                    Icons.Filled.Crop, null,
-                    modifier = Modifier.size(16.dp),
-                    tint = MaterialTheme.colorScheme.primary
+                    Icons.Filled.KeyboardArrowDown,
+                    null,
+                    modifier = Modifier.rotate(if (expanded) 180f else 0f)
                 )
-                Spacer(Modifier.width(8.dp))
-                Text("Crop", style = MaterialTheme.typography.labelMedium)
+                Spacer(Modifier.width(6.dp))
+                Text(if (expanded) "Hide editing" else "Edit crop, rotation & zoom")
             }
-            Row(
-                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                CropPresets.keys.forEach { key ->
-                    FilterChip(
-                        selected = source.crop == key,
-                        onClick = { onEdit { sources[index].crop = key } },
-                        label = { Text(CropPresets.label(key)) }
+
+            AnimatedVisibility(visible = expanded) {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
+                    Row(
+                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        CropPresets.keys.forEach { key ->
+                            FilterChip(
+                                selected = source.crop == key,
+                                onClick = { onEdit { sources[index].crop = key } },
+                                leadingIcon = {
+                                    Icon(
+                                        Icons.Filled.Crop, null,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                },
+                                label = { Text(CropPresets.label(key)) }
+                            )
+                        }
+                    }
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceEvenly,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        MiniIcon(Icons.Filled.RotateLeft, "Rotate left") {
+                            onEdit { sources[index].rotation = (sources[index].rotation + 270) % 360 }
+                        }
+                        MiniIcon(Icons.Filled.RotateRight, "Rotate right") {
+                            onEdit { sources[index].rotation = (sources[index].rotation + 90) % 360 }
+                        }
+                        MiniIcon(Icons.Filled.Flip, "Mirror") {
+                            onEdit { sources[index].mirror = !sources[index].mirror }
+                        }
+                        MiniIcon(Icons.Filled.ZoomOut, "Zoom out") {
+                            onEdit { sources[index].zoom = (sources[index].zoom - 0.1f).coerceAtLeast(0.5f) }
+                        }
+                        MiniIcon(Icons.Filled.ZoomIn, "Zoom in") {
+                            onEdit { sources[index].zoom = (sources[index].zoom + 0.1f).coerceAtMost(3f) }
+                        }
+                    }
+                    Text(
+                        "Zoom  " + "%.1f".format(source.zoom) + "x",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                }
-            }
-
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceEvenly,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                EditIconButton(Icons.Filled.RotateLeft, "Rotate left") {
-                    onEdit { sources[index].rotation = (sources[index].rotation + 270) % 360 }
-                }
-                EditIconButton(Icons.Filled.RotateRight, "Rotate right") {
-                    onEdit { sources[index].rotation = (sources[index].rotation + 90) % 360 }
-                }
-                EditIconButton(Icons.Filled.Flip, "Mirror") {
-                    onEdit { sources[index].mirror = !sources[index].mirror }
-                }
-                EditIconButton(Icons.Filled.ZoomOut, "Zoom out") {
-                    onEdit { sources[index].zoom = (sources[index].zoom - 0.1f).coerceAtLeast(0.5f) }
-                }
-                EditIconButton(Icons.Filled.ZoomIn, "Zoom in") {
-                    onEdit { sources[index].zoom = (sources[index].zoom + 0.1f).coerceAtMost(3f) }
-                }
-            }
-
-            Column {
-                Text(
-                    "Zoom  " + "%.1f".format(source.zoom) + "x",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Slider(
-                    value = source.zoom,
-                    onValueChange = { onEdit { sources[index].zoom = it } },
-                    valueRange = 0.5f..3f
-                )
-            }
-
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                FilledTonalButton(onClick = { onApply("play", null) }, modifier = Modifier.weight(1f)) {
-                    Icon(Icons.Filled.PlayArrow, null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Text("Play")
-                }
-                FilledTonalButton(onClick = { onApply("pause", null) }, modifier = Modifier.weight(1f)) {
-                    Icon(Icons.Filled.Pause, null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Text("Pause")
+                    Slider(
+                        value = source.zoom,
+                        onValueChange = { onEdit { sources[index].zoom = it } },
+                        valueRange = 0.5f..3f
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilledTonalButton(
+                            onClick = { onApply("play", null) },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Filled.PlayArrow, null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Play")
+                        }
+                        FilledTonalButton(
+                            onClick = { onApply("pause", null) },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Filled.Pause, null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Pause")
+                        }
+                        FilledTonalButton(
+                            onClick = { onApply("reset", null) },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Filled.RestartAlt, null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Reset")
+                        }
+                    }
                 }
             }
         }
@@ -972,57 +658,152 @@ private fun MediaCard(
 }
 
 @Composable
-private fun EditIconButton(icon: ImageVector, label: String, onClick: () -> Unit) {
+private fun MiniIcon(icon: ImageVector, label: String, onClick: () -> Unit) {
     Surface(
         onClick = onClick,
         shape = CircleShape,
         color = MaterialTheme.colorScheme.primaryContainer,
         contentColor = MaterialTheme.colorScheme.primary
     ) {
-        Box(Modifier.size(42.dp), contentAlignment = Alignment.Center) {
-            Icon(icon, label, modifier = Modifier.size(20.dp))
+        Box(Modifier.size(38.dp), contentAlignment = Alignment.Center) {
+            Icon(icon, label, modifier = Modifier.size(18.dp))
         }
     }
 }
 
-private fun import(context: Context, uri: Uri?, type: String): SourceConfig? {
-    if (uri == null) return null
-    return try {
-        val resolver = context.contentResolver
-        val name = resolver.query(uri, null, null, null, null)?.use { cursor ->
-            val idx = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
-            if (idx >= 0 && cursor.moveToFirst()) cursor.getString(idx) else null
-        } ?: "media"
-        val ext = if (name.contains('.')) name.substringAfterLast('.') else if (type == "video") "mp4" else "jpg"
-        val filename = "src_${System.currentTimeMillis()}.$ext"
-        resolver.openInputStream(uri)?.use { input ->
-            ConfigStore.get(context).mediaFile(filename).outputStream().use { out -> input.copyTo(out) }
-        } ?: return null
-        SourceConfig(type = type, name = name, path = filename)
-    } catch (t: Throwable) {
-        Toast.makeText(context, "Could not import media", Toast.LENGTH_SHORT).show()
-        null
+@Composable
+private fun TargetCard(
+    cfg: AppConfig,
+    apps: List<AppEntry>,
+    query: String,
+    onQuery: (String) -> Unit,
+    expanded: Boolean,
+    onExpand: () -> Unit,
+    onEdit: (AppConfig.() -> Unit) -> Unit
+) {
+    val filtered = apps.filter {
+        it.label.contains(query, ignoreCase = true) ||
+            it.packageName.contains(query, ignoreCase = true)
+    }
+    Card(Modifier.fillMaxWidth().animateContentSize()) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(
+                Modifier.clickable(onClick = onExpand),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    Modifier
+                        .size(34.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(MaterialTheme.colorScheme.primaryContainer),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        Icons.Filled.Apps, null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("Target apps", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        if (cfg.targets.isEmpty()) "None selected" else "${cfg.targets.size} selected",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Icon(
+                    Icons.Filled.KeyboardArrowDown,
+                    null,
+                    modifier = Modifier.rotate(if (expanded) 180f else 0f)
+                )
+            }
+
+            AnimatedVisibility(visible = expanded) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = query,
+                        onValueChange = onQuery,
+                        label = { Text("Search apps") },
+                        leadingIcon = { Icon(Icons.Filled.Search, null) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            onClick = { onEdit { targets.addAll(apps.map { it.packageName }) } },
+                            modifier = Modifier.weight(1f)
+                        ) { Text("Select all") }
+                        OutlinedButton(
+                            onClick = { onEdit { targets.clear() } },
+                            modifier = Modifier.weight(1f)
+                        ) { Text("Clear") }
+                    }
+                    if (apps.isEmpty()) {
+                        Text(
+                            "Loading apps…",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(8.dp)
+                        )
+                    } else {
+                        LazyColumn(Modifier.height(260.dp).fillMaxWidth()) {
+                            items(filtered, key = { it.packageName }) { app ->
+                                val selected = cfg.targets.contains(app.packageName)
+                                Row(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            onEdit {
+                                                if (targets.contains(app.packageName)) {
+                                                    targets.remove(app.packageName)
+                                                } else {
+                                                    targets.add(app.packageName)
+                                                }
+                                            }
+                                        }
+                                        .padding(vertical = 6.dp, horizontal = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(
+                                        Icons.Filled.Android, null,
+                                        modifier = Modifier.size(18.dp),
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    Spacer(Modifier.width(10.dp))
+                                    Column(Modifier.weight(1f)) {
+                                        Text(app.label, style = MaterialTheme.typography.bodyMedium)
+                                        Text(app.packageName, style = MaterialTheme.typography.labelSmall)
+                                    }
+                                    Checkbox(checked = selected, onCheckedChange = null)
+                                }
+                            }
+                        }
+                    }
+                    Text(
+                        "Also enable OpenVCam and these apps in LSPosed/Vector scope.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
     }
 }
 
 @Composable
-private fun MediaPreview(
-    context: Context,
-    source: SourceConfig,
-    compact: Boolean = false
-) {
+private fun MediaPreview(context: Context, source: SourceConfig) {
     val uri = uriFor(source.path)
     val ratio = CropPresets.ratio(source.crop)
-    val imageBitmap by produceImageBitmap(context, uri)
-
+    val bitmap by produceImageBitmap(context, uri)
     val transform = Modifier
         .graphicsLayer(
             scaleX = source.zoom * if (source.mirror) -1f else 1f,
             scaleY = source.zoom
         )
         .rotate(source.rotation.toFloat())
-
-    val cropModifier = when {
+    val crop = when {
         ratio == null -> Modifier.fillMaxSize()
         ratio >= 1f -> Modifier.fillMaxWidth().aspectRatio(ratio)
         else -> Modifier.fillMaxHeight().aspectRatio(ratio)
@@ -1031,19 +812,19 @@ private fun MediaPreview(
     Box(
         Modifier
             .fillMaxWidth()
-            .height(if (compact) 120.dp else 210.dp)
-            .clip(RoundedCornerShape(16.dp))
+            .height(132.dp)
+            .clip(RoundedCornerShape(14.dp))
             .background(Color(0xFF0B1020)),
         contentAlignment = Alignment.Center
     ) {
         if (uri == null) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Icon(
-                    Icons.Filled.Image, null,
+                    Icons.Filled.Info, null,
                     tint = Color.White.copy(alpha = 0.5f),
-                    modifier = Modifier.size(if (compact) 24.dp else 36.dp)
+                    modifier = Modifier.size(26.dp)
                 )
-                Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(6.dp))
                 Text(
                     "Live preview",
                     color = Color.White.copy(alpha = 0.65f),
@@ -1051,7 +832,7 @@ private fun MediaPreview(
                 )
             }
         } else {
-            Box(cropModifier.then(transform)) {
+            Box(crop.then(transform)) {
                 if (source.type == "video") {
                     AndroidView(
                         factory = { ctx ->
@@ -1068,31 +849,15 @@ private fun MediaPreview(
                         modifier = Modifier.fillMaxSize()
                     )
                 } else {
-                    imageBitmap?.let { bitmap ->
+                    bitmap?.let { image ->
                         Image(
-                            bitmap = bitmap,
+                            bitmap = image,
                             contentDescription = "Media preview",
                             modifier = Modifier.fillMaxSize(),
                             contentScale = ContentScale.Crop
                         )
                     }
                 }
-            }
-        }
-
-        if (!compact) {
-            Surface(
-                Modifier.padding(10.dp).align(Alignment.BottomStart),
-                color = Color.Black.copy(alpha = 0.55f),
-                contentColor = Color.White,
-                shape = CircleShape
-            ) {
-                Text(
-                    CropPresets.label(source.crop) + "  ·  " + source.rotation + "°  ·  " +
-                        "%.1f".format(source.zoom) + "x",
-                    style = MaterialTheme.typography.labelSmall,
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
-                )
             }
         }
     }
@@ -1104,13 +869,11 @@ private fun produceImageBitmap(
     uri: Uri?
 ): androidx.compose.runtime.State<androidx.compose.ui.graphics.ImageBitmap?> {
     val state = remember { mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null) }
-    // Only re-decode when the media itself changes; the periodic status refresh must not
-    // re-decode a large bitmap on the main thread every few seconds.
     LaunchedEffect(uri) {
         val next = if (uri == null) null else withContext(Dispatchers.IO) {
             try {
-                val source = ImageDecoder.createSource(context.contentResolver, uri)
-                ImageDecoder.decodeBitmap(source).asImageBitmap()
+                ImageDecoder.decodeBitmap(ImageDecoder.createSource(context.contentResolver, uri))
+                    .asImageBitmap()
             } catch (_: Throwable) {
                 null
             }
@@ -1120,70 +883,4 @@ private fun produceImageBitmap(
         if (previous !== next) runCatching { previous?.asAndroidBitmap()?.recycle() }
     }
     return state
-}
-
-@Composable
-private fun ControlCard(context: Context, apply: (String, Any?) -> Unit) {
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                ControlButton(Icons.Filled.PlayArrow, "Play") { apply("play", null) }
-                ControlButton(Icons.Filled.Pause, "Pause") { apply("pause", null) }
-                ControlButton(Icons.Filled.RestartAlt, "Reset") { apply("reset", null) }
-                ControlButton(Icons.Filled.Settings, "Virtual") { apply("toggleVirtual", null) }
-            }
-            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                FilledTonalButton(
-                    onClick = {
-                        context.startForegroundService(Intent(context, CoreKeepAliveService::class.java))
-                    },
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Icon(Icons.Filled.Build, null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Text("Core")
-                }
-                FilledTonalButton(
-                    onClick = {
-                        if (!Settings.canDrawOverlays(context)) {
-                            context.startActivity(
-                                Intent(
-                                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                                    Uri.parse("package:${context.packageName}")
-                                )
-                            )
-                        } else {
-                            context.startForegroundService(Intent(context, FloatingControlService::class.java))
-                        }
-                    },
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Icon(Icons.Filled.Layers, null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Text("Floating")
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun ControlButton(icon: ImageVector, label: String, onClick: () -> Unit) {
-    Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
-        modifier = Modifier.clickable(onClick = onClick).padding(8.dp)
-    ) {
-        Box(
-            Modifier
-                .size(46.dp)
-                .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.primaryContainer),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(icon, label, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(22.dp))
-        }
-        Spacer(Modifier.height(6.dp))
-        Text(label, style = MaterialTheme.typography.labelSmall)
-    }
 }
