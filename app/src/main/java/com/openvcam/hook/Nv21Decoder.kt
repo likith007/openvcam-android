@@ -8,6 +8,7 @@ import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.os.Bundle
+import com.openvcam.core.CropPresets
 import org.json.JSONObject
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.cos
@@ -32,6 +33,7 @@ class Nv21Decoder(private val context: Context) {
     @Volatile var rotation: Int = 0
     @Volatile var mirror: Boolean = false
     @Volatile var zoom: Float = 1f
+    @Volatile var crop: String = "full"
     @Volatile var playing: Boolean = true
 
     @Volatile private var currentKey: String? = null
@@ -42,9 +44,10 @@ class Nv21Decoder(private val context: Context) {
         rotation = source?.optInt("rotation", 0) ?: 0
         mirror = source?.optBoolean("mirror", false) ?: true
         zoom = (source?.optDouble("zoom", 1.0) ?: 1.0).toFloat().coerceIn(0.5f, 3f)
+        crop = source?.optString("crop", "full") ?: "full"
         playing = config?.optBoolean("playing", true) ?: true
 
-        val key = "$type|$path|$rotation|$mirror|$zoom"
+        val key = "$type|$path|$rotation|$mirror|$zoom|$crop"
         if (key == currentKey && running.get()) return
         release()
         currentKey = key
@@ -164,8 +167,10 @@ class Nv21Decoder(private val context: Context) {
         val sw = rawWidth
         val sh = rawHeight
         if (sw <= 0 || sh <= 0) return null
-        if (sw == width && sh == height && rotation % 180 == 0 && !mirror && zoom == 1f) return src
-        return transformNv21(src, sw, sh, width, height, rotation, mirror, zoom)
+        if (sw == width && sh == height && rotation % 180 == 0 && !mirror &&
+            zoom == 1f && crop == "full"
+        ) return src
+        return transformNv21(src, sw, sh, width, height, rotation, mirror, zoom, crop)
     }
 
     fun release() {
@@ -251,20 +256,23 @@ class Nv21Decoder(private val context: Context) {
 
     private fun transformNv21(
         src: ByteArray, sw: Int, sh: Int, dw: Int, dh: Int,
-        rotationDeg: Int, mirror: Boolean, zoom: Float
+        rotationDeg: Int, mirror: Boolean, zoom: Float, crop: String
     ): ByteArray {
         val out = ByteArray(dw * dh * 3 / 2)
         val rad = Math.toRadians((-rotationDeg).toDouble())
         val cosR = cos(rad).toFloat()
         val sinR = sin(rad).toFloat()
         val chromaBase = sw * sh
+        val (cropX, cropY) = CropPresets.factors(sw, sh, crop, rotationDeg)
+        val zoomX = zoom * cropX
+        val zoomY = zoom * cropY
 
         for (y in 0 until dh) {
             for (x in 0 until dw) {
                 var u = (x + 0.5f) / dw - 0.5f
                 var v = (y + 0.5f) / dh - 0.5f
-                u /= zoom
-                v /= zoom
+                u /= zoomX
+                v /= zoomY
                 val ru = u * cosR - v * sinR
                 val rv = u * sinR + v * cosR
                 val mu = if (mirror) -ru else ru

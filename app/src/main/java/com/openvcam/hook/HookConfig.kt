@@ -2,6 +2,7 @@ package com.openvcam.hook
 
 import android.content.Context
 import android.net.Uri
+import android.os.Bundle
 import android.os.SystemClock
 import org.json.JSONObject
 
@@ -18,6 +19,9 @@ object HookConfig {
     @Volatile
     private var lastFetch: Long = 0L
 
+    @Volatile
+    private var lastHeartbeat: Long = 0L
+
     fun snapshot(): JSONObject? {
         val ctx = context ?: return cached
         val now = SystemClock.elapsedRealtime()
@@ -28,6 +32,19 @@ object HookConfig {
             val json = bundle?.getString("json")
             if (!json.isNullOrEmpty()) cached = JSONObject(json)
         } catch (_: Throwable) {
+        }
+
+        if (now - lastHeartbeat > 10_000L) {
+            lastHeartbeat = now
+            try {
+                ctx.contentResolver.call(
+                    ROOT_URI,
+                    "heartbeat",
+                    null,
+                    Bundle().apply { putString("package", ctx.packageName) }
+                )
+            } catch (_: Throwable) {
+            }
         }
         return cached
     }

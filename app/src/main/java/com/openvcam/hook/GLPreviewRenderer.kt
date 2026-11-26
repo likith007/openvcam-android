@@ -12,6 +12,7 @@ import android.opengl.GLES20
 import android.opengl.GLUtils
 import android.opengl.Matrix
 import android.view.Surface
+import com.openvcam.core.CropPresets
 import org.json.JSONObject
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.roundToInt
@@ -41,6 +42,9 @@ class GLPreviewRenderer(private val context: Context, private val surface: Surfa
     @Volatile private var rotation = 0
     @Volatile private var mirror = false
     @Volatile private var zoom = 1f
+    @Volatile private var crop = "full"
+    @Volatile private var sourceWidth = 0
+    @Volatile private var sourceHeight = 0
     @Volatile private var speed = 1f
     @Volatile private var playing = true
     @Volatile private var lastKey = ""
@@ -85,6 +89,7 @@ class GLPreviewRenderer(private val context: Context, private val surface: Surfa
         rotation = source?.optInt("rotation", 0) ?: 0
         mirror = source?.optBoolean("mirror", false) ?: false
         zoom = (source?.optDouble("zoom", 1.0) ?: 1.0).toFloat().coerceIn(0.5f, 3f)
+        crop = source?.optString("crop", "full") ?: "full"
         speed = (config?.optDouble("speed", 1.0) ?: 1.0).toFloat().coerceIn(0.25f, 4f)
         playing = config?.optBoolean("playing", true) ?: true
     }
@@ -123,8 +128,7 @@ class GLPreviewRenderer(private val context: Context, private val surface: Surfa
                     Matrix.multiplyMM(combined, 0, ourMatrix, 0, stMatrix, 0)
                     draw(programOes, textureOes, combined, flipV = false)
                 } else {
-                    Matrix.setIdentityM(combined, 0)
-                    draw(program2d, texture2d, combined, flipV = true)
+                    draw(program2d, texture2d, ourMatrix, flipV = true)
                 }
 
                 EGL14.eglSwapBuffers(display, eglSurface)
@@ -141,8 +145,13 @@ class GLPreviewRenderer(private val context: Context, private val surface: Surfa
         Matrix.translateM(out, 0, 0.5f, 0.5f, 0f)
         if (mirror) Matrix.scaleM(out, 0, -1f, 1f, 1f)
         Matrix.rotateM(out, 0, -rotation.toFloat(), 0f, 0f, 1f)
+        val (fx, fy) = CropPresets.factors(sourceWidth, sourceHeight, crop, rotation)
+        // CropPresets returns sampling multipliers (>1 crops that axis); GL texture
+        // coordinates need the inverse to zoom into the center of the texture.
+        val cx = 1f / fx
+        val cy = 1f / fy
         val z = 1f / zoom.coerceIn(0.5f, 3f)
-        Matrix.scaleM(out, 0, z, z, 1f)
+        Matrix.scaleM(out, 0, z * cx, z * cy, 1f)
         Matrix.translateM(out, 0, -0.5f, -0.5f, 0f)
     }
 
@@ -209,6 +218,10 @@ class GLPreviewRenderer(private val context: Context, private val surface: Surfa
             }
             surfaceTexture = st
             val mp = MediaPlayer()
+            mp.setOnVideoSizeChangedListener { _, w, h ->
+                sourceWidth = w
+                sourceHeight = h
+            }
             mp.setDataSource(context, HookConfig.mediaUri(path))
             mp.setSurface(Surface(st))
             mp.isLooping = true
@@ -223,6 +236,8 @@ class GLPreviewRenderer(private val context: Context, private val surface: Surfa
             val bitmap: Bitmap? = BitmapFactory.decodeStream(stream)
             stream.close()
             if (bitmap != null) {
+                sourceWidth = bitmap.width
+                sourceHeight = bitmap.height
                 GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture2d)
                 GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bitmap, 0)
                 bitmap.recycle()

@@ -11,7 +11,8 @@ data class SourceConfig(
     var path: String = "",              // filename inside filesDir/media
     var rotation: Int = 0,              // 0 | 90 | 180 | 270
     var mirror: Boolean = false,
-    var zoom: Float = 1f
+    var zoom: Float = 1f,
+    var crop: String = "full"           // full | 1:1 | 4:3 | 16:9 | 9:16
 )
 
 data class AppConfig(
@@ -53,6 +54,21 @@ class ConfigStore private constructor(private val context: Context) {
             }
         }
     }
+
+    private val lastHeartbeat = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    fun recordHeartbeat(packageName: String) {
+        if (packageName.isNotBlank()) lastHeartbeat[packageName] = System.currentTimeMillis()
+    }
+
+    fun heartbeats(): Map<String, Long> = HashMap(lastHeartbeat)
+
+    fun isHookActive(packageName: String): Boolean {
+        val time = lastHeartbeat[packageName] ?: return false
+        return System.currentTimeMillis() - time < 120_000L
+    }
+
+    fun anyHookActive(): Boolean = lastHeartbeat.keys.any { isHookActive(it) }
 
     val config: AppConfig
         get() = synchronized(lock) { current }
@@ -154,6 +170,7 @@ class ConfigStore private constructor(private val context: Context) {
                     put("rotation", s.rotation)
                     put("mirror", s.mirror)
                     put("zoom", s.zoom.toDouble())
+                    put("crop", s.crop)
                 })
             }
         })
@@ -182,7 +199,8 @@ class ConfigStore private constructor(private val context: Context) {
                         path = o.optString("path", ""),
                         rotation = o.optInt("rotation", 0),
                         mirror = o.optBoolean("mirror", false),
-                        zoom = o.optDouble("zoom", 1.0).toFloat()
+                        zoom = o.optDouble("zoom", 1.0).toFloat(),
+                        crop = o.optString("crop", "full")
                     )
                 )
             }

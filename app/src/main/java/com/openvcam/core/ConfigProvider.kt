@@ -17,6 +17,16 @@ class ConfigProvider : ContentProvider() {
         return Bundle().apply {
             when (method) {
                 "getConfig" -> putString("json", store.snapshotJson())
+                "heartbeat" -> {
+                    store.recordHeartbeat(extras?.getString("package") ?: arg ?: "")
+                    putString("json", store.snapshotJson())
+                }
+                "getStatus" -> {
+                    val active = store.anyHookActive()
+                    putBoolean("hookActive", active)
+                    putLong("lastHeartbeat", store.heartbeats().values.maxOrNull() ?: 0L)
+                    putString("json", store.snapshotJson())
+                }
                 "applyControl" -> {
                     val action = extras?.getString("action") ?: ""
                     putString("json", store.applyControl(action, extras?.get("value")))
