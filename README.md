@@ -28,19 +28,6 @@ and it contains **no login, licensing, or subscription code**.
   startup
 - Exported `ContentProvider` used by hooks to read the shared config and media
 
-## Build
-
-```sh
-cd /data/data/com.termux/files/home/POCO-DEV/APK-Lab/OpenVCam
-export JAVA_HOME=/data/data/com.termux/files/usr/lib/jvm/java-17-openjdk
-export PATH=/data/data/com.termux/files/home/gradle-8.7/bin:$JAVA_HOME/bin:$PATH
-gradle assembleDebug --no-daemon
-```
-
-Outputs:
-- Debug: `app/build/outputs/apk/debug/app-debug.apk`
-- Release: `app/build/outputs/apk/release/app-release.apk`
-
 For a release build with your own key, create `keystore.properties` in the project root:
 
 ```properties
