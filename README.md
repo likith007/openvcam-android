@@ -19,7 +19,8 @@ and it contains **no login, licensing, or subscription code**.
 - **Root helper** — one-tap grant of notification permission and root-started keep-alive service
 - Camera1: preview callback NV21 injection, preview surface replacement, photo capture replacement
 - Camera2: session output redirection + GL preview rendering, JPEG still-image replacement,
-  `SessionConfiguration` support
+  `SessionConfiguration` support, and hidden `CameraDeviceImpl.createCaptureSessionInternal`
+  hooking for CameraX
 - Surface-size tracking for `SurfaceTexture`, `SurfaceView`, `MediaCodec` and `MediaRecorder`
   outputs, so replacement streams use the dimensions the target app expects instead of a 1x1
   dummy texture

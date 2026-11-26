@@ -14,9 +14,11 @@ import android.view.Surface
 import de.robv.android.xposed.callbacks.XC_MethodHook
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
+import java.lang.reflect.Modifier
+import java.lang.reflect.Proxy
 import java.util.Collections
+import java.util.IdentityHashMap
 import java.util.WeakHashMap
-import java.util.concurrent.Executor
 
 object Camera2Hook {
 
@@ -42,6 +44,7 @@ object Camera2Hook {
     private val pending = ThreadLocal.withInitial { mutableListOf<Dummy>() }
     @Volatile private var jpegDecoder: Nv21Decoder? = null
     @Volatile private var syncRetryPending = false
+    @Volatile private var internalSessionHooked = false
 
     private fun isReaderSurface(surface: Surface): Boolean = imageReaderSurfaces.contains(surface)
 
@@ -73,6 +76,87 @@ object Camera2Hook {
         if (dummy.drainer != null) dummy.drainer.release() else runCatching { dummy.texture?.release() }
     }
 
+    /**
+     * Builds a replacement OutputConfiguration that keeps CameraX's stream sharing,
+     * physical camera id, stream use case, timestamp base, dynamic range and sensor
+     * pixel mode metadata. Only the Surfaces are swapped for our dummy surfaces.
+     */
+    private fun copyOutputConfiguration(
+        original: OutputConfiguration,
+        replacements: List<Surface>
+    ): OutputConfiguration {
+        val copy = OutputConfiguration(replacements.first())
+        replacements.drop(1).forEach { runCatching { copy.addSurface(it) } }
+
+        var surfaceIndex = 0
+        var clazz: Class<*>? = original.javaClass
+        while (clazz != null && clazz != Any::class.java) {
+            clazz.declaredFields.forEach { field ->
+                if (Modifier.isStatic(field.modifiers)) return@forEach
+                try {
+                    field.isAccessible = true
+                    when (val value = field.get(original)) {
+                        // The constructor already owns the replacement surface field(s).
+                        is Surface -> Unit
+                        is List<*> -> {
+                            val copied = ArrayList<Any?>(value.size)
+                            value.forEach { item ->
+                                if (item is Surface) {
+                                    if (surfaceIndex < replacements.size) {
+                                        copied.add(replacements[surfaceIndex++])
+                                    } else {
+                                        copied.add(item)
+                                    }
+                                } else {
+                                    copied.add(item)
+                                }
+                            }
+                            field.set(copy, copied)
+                        }
+                        else -> field.set(copy, value)
+                    }
+                } catch (_: Throwable) {
+                }
+            }
+            clazz = clazz.superclass
+        }
+        return copy
+    }
+
+    /** Fallback for unusual OutputConfiguration implementations that resist copying. */
+    private fun mutateOutputConfiguration(
+        config: OutputConfiguration,
+        originals: List<Surface>,
+        replacements: List<Surface>
+    ) {
+        val map = IdentityHashMap<Surface, Surface>()
+        originals.forEachIndexed { index, surface -> map[surface] = replacements.getOrNull(index) ?: surface }
+        var clazz: Class<*>? = config.javaClass
+        while (clazz != null && clazz != Any::class.java) {
+            clazz.declaredFields.forEach { field ->
+                if (Modifier.isStatic(field.modifiers)) return@forEach
+                try {
+                    field.isAccessible = true
+                    when (val value = field.get(config)) {
+                        is Surface -> map[value]?.let { field.set(config, it) }
+                        is MutableList<*> -> {
+                            @Suppress("UNCHECKED_CAST")
+                            val list = value as MutableList<Any?>
+                            var index = 0
+                            while (index < list.size) {
+                                val item = list[index]
+                                if (item is Surface) map[item]?.let { list[index] = it }
+                                index++
+                            }
+                        }
+                    }
+                } catch (_: Throwable) {
+                }
+            }
+            clazz = clazz.superclass
+        }
+    }
+
     private fun replaceOutputs(outputs: List<*>): List<Any?> {
         val collector = pending.get()
         return outputs.map { item ->
@@ -85,34 +169,124 @@ object Camera2Hook {
                     }
                 }
                 is OutputConfiguration -> {
-                    val surface = runCatching { item.surface }.getOrNull()
-                    if (surface != null && !isReaderSurface(surface)) {
-                        val dummy = dummyFor(surface)
-                        collector.add(dummy)
-                        runCatching { OutputConfiguration(dummy.surface) }.getOrDefault(item)
-                    } else item
+                    val surfaces = runCatching { item.surfaces }.getOrNull()
+                        ?.takeIf { it.isNotEmpty() }
+                        ?: listOfNotNull(runCatching { item.surface }.getOrNull())
+                    if (surfaces.isEmpty()) return@map item
+                    val replacements = surfaces.map { surface ->
+                        if (isReaderSurface(surface)) surface else {
+                            val dummy = dummyFor(surface)
+                            collector.add(dummy)
+                            dummy.surface
+                        }
+                    }
+                    val unchanged = surfaces.indices.all { surfaces[it] === replacements[it] }
+                    if (unchanged) return@map item
+                    runCatching { copyOutputConfiguration(item, replacements) }
+                        .onFailure {
+                            HookLog.once(
+                                "c2.output-copy",
+                                "OutputConfiguration copy failed: ${it.message}"
+                            )
+                            runCatching { mutateOutputConfiguration(item, surfaces, replacements) }
+                        }
+                        .getOrDefault(item)
                 }
                 else -> item
             }
         }
     }
 
+    /** Keeps the original SessionConfiguration so CameraX extras are preserved. */
     private fun replaceSessionConfiguration(config: Any): Any? {
         return try {
-            val clazz = config.javaClass
-            val outputs = clazz.getMethod("getOutputConfigurations").invoke(config) as? List<*>
-                ?: return null
+            val outputs = config.javaClass.getMethod("getOutputConfigurations")
+                .invoke(config) as? List<*> ?: return null
             val replaced = replaceOutputs(outputs)
-            val configs = replaced.filterIsInstance<OutputConfiguration>()
-            if (configs.size != replaced.size) return null
-            val type = clazz.getMethod("getSessionType").invoke(config) as Int
-            val executor = clazz.getMethod("getExecutor").invoke(config) as Executor
-            val callback = clazz.getMethod("getStateCallback").invoke(config)
-                as CameraCaptureSession.StateCallback
-            SessionConfiguration(type, configs, executor, callback)
+            if (replaced.any { it !is OutputConfiguration }) return null
+            config
         } catch (_: Throwable) {
             null
         }
+    }
+
+    private fun invokeOn(
+        target: Any?,
+        method: java.lang.reflect.Method,
+        args: Array<Any?>?
+    ): Any? = try {
+        method.isAccessible = true
+        method.invoke(target, *(args ?: emptyArray()))
+    } catch (_: Throwable) {
+        when (method.returnType) {
+            java.lang.Boolean.TYPE -> false
+            java.lang.Integer.TYPE -> 0
+            java.lang.Long.TYPE -> 0L
+            java.lang.Float.TYPE -> 0f
+            java.lang.Double.TYPE -> 0.0
+            java.lang.Short.TYPE -> 0.toShort()
+            java.lang.Byte.TYPE -> 0.toByte()
+            java.lang.Character.TYPE -> 0.toChar()
+            else -> null
+        }
+    }
+
+    /**
+     * The hidden createCaptureSessionInternal path returns void, so the configured
+     * session is learned from the original StateCallback instead of the hook result.
+     */
+    private fun wrapStateCallback(
+        original: Any,
+        device: Any,
+        dummies: List<Dummy>
+    ): Any = Proxy.newProxyInstance(
+        CameraCaptureSession.StateCallback::class.java.classLoader,
+        arrayOf(CameraCaptureSession.StateCallback::class.java)
+    ) { _, method, args ->
+        when (method.name) {
+            "onConfigured" -> {
+                (args?.getOrNull(0) as? CameraCaptureSession)?.let { session ->
+                    registerState(device, dummies, session)
+                }
+            }
+            "onClosed" -> {
+                (args?.getOrNull(0) as? CameraCaptureSession)?.let { unregisterState(it) }
+            }
+        }
+        invokeOn(original, method, args)
+    }
+
+    private fun registerState(device: Any, dummies: List<Dummy>, session: Any?) {
+        if (dummies.isEmpty()) return
+        val cfg = HookConfig.snapshot()
+        if (!HookConfig.shouldReplace(cfg)) return
+        val context = HookConfig.context ?: return
+        val existing = sessions.values.firstOrNull {
+            !it.disposed && it.device === device && it.dummies == dummies
+        }
+        val state = existing ?: SessionState(device).also { created ->
+            created.dummies.addAll(dummies)
+            sessions[device] = created
+            dummies.forEach { dummy ->
+                if (!dummy.original.isValid) return@forEach
+                val renderer = GLPreviewRenderer(context, dummy.original)
+                renderer.start(HookConfig.activeSource(cfg), cfg)
+                created.renderers.add(renderer)
+            }
+            HookLog.once(
+                "c2.renderer",
+                "Camera2 renderer started for ${created.dummies.size} output(s)"
+            )
+        }
+        if (session != null) {
+            sessions[session] = state
+            sessionKeys[session] = state
+        }
+    }
+
+    private fun unregisterState(session: Any) {
+        val state = sessionKeys.remove(session) ?: sessions.remove(session)
+        if (state != null) disposeState(state, session)
     }
 
     private fun stopRenderers(state: SessionState) {
@@ -225,6 +399,51 @@ object Camera2Hook {
         ByteArray(0)
     }
 
+    /**
+     * CameraX 1.4 calls the hidden CameraDeviceImpl.createCaptureSessionInternal
+     * path, so hooking only the public createCaptureSession overloads can miss the
+     * real session setup. Reflective lookup keeps this working across Android
+     * versions without hard-coding a private method signature.
+     */
+    private fun installInternalSessionHook(deviceClass: Class<*>) {
+        val methods = HookUtils.declaredMethods(deviceClass)
+            .filter { it.name == "createCaptureSessionInternal" }
+        if (methods.isEmpty()) return
+
+        val callback = object : XC_MethodHook() {
+            override fun beforeHookedMethod(param: MethodHookParam) {
+                pending.get().clear()
+                if (!HookConfig.shouldReplace(HookConfig.snapshot())) return
+                val args = param.args
+                val callbackIndex = args.indexOfFirst { it is CameraCaptureSession.StateCallback }
+                val outputIndex = args.indexOfFirst { arg ->
+                    arg is List<*> && arg.any { it is OutputConfiguration || it is Surface }
+                }
+                if (callbackIndex < 0 || outputIndex < 0) return
+                val outputs = args[outputIndex] as? List<*> ?: return
+                val originalCallback = args[callbackIndex] ?: return
+
+                args[outputIndex] = replaceOutputs(outputs)
+                args[callbackIndex] = wrapStateCallback(
+                    originalCallback,
+                    param.thisObject,
+                    pending.get().toList()
+                )
+                HookLog.once("c2.internal", "Camera2 internal session outputs replaced")
+            }
+
+            override fun afterHookedMethod(param: MethodHookParam) {
+                val dummies = pending.get().toList()
+                pending.get().clear()
+                registerState(param.thisObject, dummies, null)
+            }
+        }
+
+        methods.forEach { HookUtils.hook(it, callback, "Camera2.internalSession") }
+        internalSessionHooked = true
+        HookLog.once("c2.internal-install", "Camera2 internal session hook installed")
+    }
+
     fun install(loader: ClassLoader) {
         val readerClass = HookUtils.findClass("android.media.ImageReader", loader)
         if (readerClass != null) {
@@ -258,9 +477,24 @@ object Camera2Hook {
             )
         }
 
+        val managerClass = HookUtils.findClass("android.hardware.camera2.CameraManager", loader)
+        if (managerClass != null) {
+            HookUtils.hookAllNamed(
+                managerClass, listOf("openCamera"),
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        HookLog.once("c2.open", "Camera2 camera opened by ${HookConfig.context?.packageName}")
+                    }
+                },
+                "Camera2.open"
+            )
+        }
+
         val deviceClass = HookUtils.findClass("android.hardware.camera2.impl.CameraDeviceImpl", loader)
             ?: HookUtils.findClass("android.hardware.camera2.CameraDevice", loader)
             ?: return
+
+        installInternalSessionHook(deviceClass)
 
         val sessionHook = object : XC_MethodHook() {
             override fun beforeHookedMethod(param: MethodHookParam) {
@@ -292,38 +526,28 @@ object Camera2Hook {
             }
 
             override fun afterHookedMethod(param: MethodHookParam) {
-                val cfg = HookConfig.snapshot()
-                if (!HookConfig.shouldReplace(cfg)) return
-                val context = HookConfig.context ?: return
-                val device = param.thisObject
-                val state = SessionState(device)
-                state.dummies.addAll(pending.get())
+                val dummies = pending.get().toList()
                 pending.get().clear()
-
-                state.dummies.forEach { dummy ->
-                    if (!dummy.original.isValid) return@forEach
-                    val renderer = GLPreviewRenderer(context, dummy.original)
-                    renderer.start(HookConfig.activeSource(cfg), cfg)
-                    state.renderers.add(renderer)
-                }
-                val key = param.result ?: device
-                sessions[key] = state
-                param.result?.let { sessionKeys[it] = state }
+                registerState(param.thisObject, dummies, param.result)
             }
         }
 
-        HookUtils.hookAllNamed(
-            deviceClass,
-            listOf(
-                "createCaptureSession",
-                "createCaptureSessionByOutputConfigurations",
-                "createConstrainedHighSpeedCaptureSession",
-                "createReprocessableCaptureSession",
-                "createReprocessableCaptureSessionByConfigurations"
-            ),
-            sessionHook,
-            "Camera2.session"
-        )
+        // The internal hook also sees calls made through the public overloads, so
+        // skip the public hook when it is available to avoid duplicate renderers.
+        if (!internalSessionHooked) {
+            HookUtils.hookAllNamed(
+                deviceClass,
+                listOf(
+                    "createCaptureSession",
+                    "createCaptureSessionByOutputConfigurations",
+                    "createConstrainedHighSpeedCaptureSession",
+                    "createReprocessableCaptureSession",
+                    "createReprocessableCaptureSessionByConfigurations"
+                ),
+                sessionHook,
+                "Camera2.session"
+            )
+        }
 
         val builderClass = HookUtils.findClass(
             "android.hardware.camera2.CaptureRequest\$Builder", loader
@@ -384,12 +608,7 @@ object Camera2Hook {
                 sessionClass, listOf("close"),
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
-                        val session = param.thisObject
-                        sessionKeys.remove(session)?.let {
-                            sessions.remove(session)
-                            disposeState(it, session)
-                        }
-                        sessions.remove(session)?.let { disposeState(it, session) }
+                        unregisterState(param.thisObject)
                     }
                 },
                 "Camera2.sessionClose"

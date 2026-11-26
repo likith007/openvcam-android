@@ -1,6 +1,7 @@
 package com.openvcam.ui
 
 import android.Manifest
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -172,6 +173,7 @@ private fun detectFramework(context: Context): String {
 
     val output = shell(
         "pm list packages | grep -Ei 'lsposed|lspatch|xposed|vector'; " +
+            "test -d /data/adb/modules/zygisk_vector && echo vector; " +
             "test -d /data/adb/lspd && echo lsposed; " +
             "test -d /data/adb/apatch && echo apatch; " +
             "test -d /data/adb/ksu && echo kernelsu; " +
@@ -180,8 +182,8 @@ private fun detectFramework(context: Context): String {
     ).lowercase()
 
     return when {
-        output.contains("lsposed") -> "LSPosed"
         output.contains("vector") -> "Vector"
+        output.contains("lsposed") -> "LSPosed"
         output.contains("lspatch") -> "LSPatch"
         output.contains("xposed") -> "Xposed"
         output.contains("apatch") -> "APatch"
@@ -191,19 +193,57 @@ private fun detectFramework(context: Context): String {
     }
 }
 
+/**
+ * Vector's manager is often parasitic: there is no installed manager package to
+ * find. Its system hook redirects any intent carrying the LAUNCH_MANAGER category
+ * out of a host activity, so we can open the scope editor without seeing a
+ * manager app at all.
+ */
+private fun vectorParasiticIntent(context: Context): Intent? {
+    val host = "com.android.shell"
+    val activities = try {
+        context.packageManager.getPackageInfo(
+            host,
+            PackageManager.GET_ACTIVITIES
+        ).activities
+    } catch (_: Throwable) {
+        null
+    }
+    val activityName = activities?.firstOrNull { it.processName == it.packageName }?.name
+        ?: "com.android.shell.BugreportWarningActivity"
+    val intent = Intent(Intent.ACTION_MAIN)
+        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        .setComponent(ComponentName(host, activityName))
+    intent.categories?.clear()
+    intent.addCategory("org.matrix.vector.manager.LAUNCH_MANAGER")
+    intent.data = Uri.parse("module://${context.packageName}:0")
+    return intent
+}
+
 private fun frameworkIntent(context: Context): Intent? {
-    frameworks.forEach { entry ->
-        entry.packages.firstOrNull { packageInstalled(context, it) }?.let { pkg ->
-            context.packageManager.getLaunchIntentForPackage(pkg)?.let { intent ->
-                // Vector accepts module://<package>:<user> and opens that module's
-                // scope editor directly. Other frameworks keep their normal launch intent.
-                if (pkg == "org.matrix.vector.manager") {
-                    intent.data = Uri.parse("module://${context.packageName}:0")
-                }
-                return intent
-            }
+    // Standalone Vector manager, when it is installed as a normal app.
+    listOf("org.matrix.vector.manager").forEach { pkg ->
+        context.packageManager.getLaunchIntentForPackage(pkg)?.let { intent ->
+            intent.data = Uri.parse("module://${context.packageName}:0")
+            return intent
         }
     }
+
+    // Vector in parasitic mode: no manager package exists.
+    vectorParasiticIntent(context)?.let { return it }
+
+    // LSPosed / LSPatch / Xposed manager packages.
+    frameworks.forEach { entry ->
+        if (entry.label == "Vector") return@forEach
+        entry.packages.firstOrNull { packageInstalled(context, it) }?.let { pkg ->
+            context.packageManager.getLaunchIntentForPackage(pkg)?.let { return it }
+        }
+    }
+
+    // Last resort: let a framework with a module:// deep link handle it.
+    val generic = Intent(Intent.ACTION_VIEW, Uri.parse("module://${context.packageName}:0"))
+        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    if (generic.resolveActivity(context.packageManager) != null) return generic
     return null
 }
 
@@ -328,7 +368,7 @@ private fun MinimalScreen() {
                     onOpenFramework = {
                         val intent = frameworkIntent(context)
                         if (intent != null) context.startActivity(intent)
-                        else Toast.makeText(context, "Install LSPosed or Vector first", Toast.LENGTH_SHORT).show()
+                        else Toast.makeText(context, "Could not open LSPosed/Vector; open the manager manually", Toast.LENGTH_SHORT).show()
                     }
                 )
             }
@@ -355,7 +395,7 @@ private fun MinimalScreen() {
                         if (intent != null) context.startActivity(intent)
                         else Toast.makeText(
                             context,
-                            "Install LSPosed or Vector first",
+                            "Could not open LSPosed/Vector; open the manager manually",
                             Toast.LENGTH_SHORT
                         ).show()
                     }
@@ -711,7 +751,7 @@ private fun ScopeCard(framework: String, onOpen: () -> Unit) {
                     Text("App scope", style = MaterialTheme.typography.titleSmall)
                     Text(
                         if (framework == "Not detected") {
-                            "Install LSPosed or Vector, then enable this module"
+                            "Enable OpenVCam and the app to hook in LSPosed/Vector"
                         } else {
                             "Enable OpenVCam and the app to hook in $framework"
                         },
