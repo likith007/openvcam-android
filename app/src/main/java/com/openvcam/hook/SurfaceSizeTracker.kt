@@ -6,7 +6,8 @@ import android.media.MediaFormat
 import android.media.MediaRecorder
 import android.view.Surface
 import android.view.SurfaceHolder
-import de.robv.android.xposed.callbacks.XC_MethodHook
+import de.robv.android.xposed.XC_MethodHook
+import de.robv.android.xposed.XC_MethodHook.MethodHookParam
 import java.util.Collections
 import java.util.IdentityHashMap
 import java.util.WeakHashMap

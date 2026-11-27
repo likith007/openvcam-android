@@ -1,6 +1,8 @@
 package com.openvcam.hook
 
+import de.robv.android.xposed.XposedBridge
 import io.github.libxposed.api.XposedModule
+import io.github.libxposed.api.XposedModuleInterface.ModuleLoadedParam
 import io.github.libxposed.api.XposedModuleInterface.PackageLoadedParam
 import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam
 
@@ -8,10 +10,16 @@ import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam
  * Modern libxposed 101 entry.
  *
  * The hook implementation is shared with the legacy Xposed entry so LSPosed and
- * Vector can both load the same APK. API 101 allows the legacy bridge to remain
- * available, while API 102 would block it.
+ * Vector can both load the same APK. Vector API 101 does not put the classic
+ * de.robv bridge on the module classloader, so the framework interface is attached
+ * to the local compatibility shim here before any package callback runs.
  */
 class OpenVCamModule : XposedModule() {
+
+    override fun onModuleLoaded(param: ModuleLoadedParam) {
+        XposedBridge.attach(this)
+        HookLog.once("api101.attach", "libxposed bridge attached")
+    }
 
     /** Fallback for frameworks that deliver only the earlier package-loaded callback. */
     override fun onPackageLoaded(param: PackageLoadedParam) {

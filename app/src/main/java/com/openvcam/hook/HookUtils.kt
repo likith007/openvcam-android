@@ -1,7 +1,8 @@
 package com.openvcam.hook
 
+import de.robv.android.xposed.XC_MethodHook
+import de.robv.android.xposed.XC_MethodHook.MethodHookParam
 import de.robv.android.xposed.XposedBridge
-import de.robv.android.xposed.callbacks.XC_MethodHook
 import java.lang.reflect.Constructor
 import java.lang.reflect.Method
 

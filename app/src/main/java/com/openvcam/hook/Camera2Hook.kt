@@ -15,7 +15,8 @@ import android.os.Handler
 import android.os.Looper
 import android.media.ImageReader
 import android.view.Surface
-import de.robv.android.xposed.callbacks.XC_MethodHook
+import de.robv.android.xposed.XC_MethodHook
+import de.robv.android.xposed.XC_MethodHook.MethodHookParam
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.lang.reflect.Method

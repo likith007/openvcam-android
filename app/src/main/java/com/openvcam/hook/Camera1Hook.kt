@@ -8,7 +8,8 @@ import android.os.Looper
 import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.TextureView
-import de.robv.android.xposed.callbacks.XC_MethodHook
+import de.robv.android.xposed.XC_MethodHook
+import de.robv.android.xposed.XC_MethodHook.MethodHookParam
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.lang.reflect.Proxy

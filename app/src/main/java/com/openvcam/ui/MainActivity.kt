@@ -1,7 +1,6 @@
 package com.openvcam.ui
 
 import android.Manifest
-import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -210,31 +209,17 @@ private fun detectFramework(context: Context): String {
 }
 
 /**
- * Vector's manager is often parasitic: there is no installed manager package to
- * find. Its system hook redirects any intent carrying the LAUNCH_MANAGER category
- * out of a host activity. This mirrors Vector's own shortcut construction; do not
- * hard-code a host activity that may not be exported.
+ * Vector's manager is usually parasitic: it lives in com.android.shell and its
+ * BugreportWarningActivity is not exported to normal apps. Launching that activity
+ * with startActivity() always throws SecurityException. Vector's own action script
+ * starts it as uid 0, so do the same from the root shell we already require.
  */
-private fun vectorParasiticIntent(context: Context): Intent? {
-    val host = "com.android.shell"
-    val pm = context.packageManager
-    var intent = pm.getLaunchIntentForPackage(host)
-    if (intent == null) {
-        val activities = try {
-            pm.getPackageInfo(host, PackageManager.GET_ACTIVITIES).activities
-        } catch (_: Throwable) {
-            null
-        }
-        val activity = activities?.firstOrNull { it.processName == it.packageName } ?: return null
-        intent = Intent(Intent.ACTION_MAIN)
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            .setComponent(ComponentName(host, activity.name))
-    }
-    intent.categories?.clear()
-    intent.addCategory("org.matrix.vector.manager.LAUNCH_MANAGER")
-    intent.setPackage(host)
-    intent.data = Uri.parse("module://${context.packageName}:0")
-    return if (intent.resolveActivity(pm) != null) intent else null
+private fun openVectorScope(context: Context): Boolean {
+    val category = "org.matrix.vector.manager.LAUNCH_MANAGER"
+    val data = "module://${context.packageName}:0"
+    val output = shell("am start -c $category -d $data com.android.shell/.BugreportWarningActivity", 6L)
+    return output.contains("Starting: Intent", ignoreCase = true) &&
+        !output.contains("Error", ignoreCase = true)
 }
 
 private fun vectorManagerIntent(context: Context): Intent? {
@@ -256,9 +241,9 @@ private fun managerIntentForLabel(context: Context, label: String): Intent? {
 
 /**
  * Detection can be ambiguous: Vector is often parasitic and LSPosed files may still be
- * present. Try the reported framework first, then the other installed managers. The
- * com.android.shell parasitic path is only attempted when Vector was explicitly detected,
- * so it can never replace a working LSPosed manager.
+ * present. Try the reported framework first, then the other installed managers. Vector's
+ * parasitic host is opened through root instead of a normal intent because its activity
+ * is not exported to third-party apps.
  */
 private fun frameworkCandidates(context: Context, detected: String): List<Intent> {
     val labels = when (detected) {
@@ -272,9 +257,6 @@ private fun frameworkCandidates(context: Context, detected: String): List<Intent
     val result = mutableListOf<Intent>()
     labels.forEach { label ->
         managerIntentForLabel(context, label)?.let { result.add(it) }
-        if (label == "Vector" && detected == "Vector") {
-            vectorParasiticIntent(context)?.let { result.add(it) }
-        }
     }
     moduleDeepLinkIntent(context)?.let { result.add(it) }
     return result.distinctBy { it.toUri(0) }
@@ -287,6 +269,8 @@ private fun moduleDeepLinkIntent(context: Context): Intent? {
 }
 
 private fun openFramework(context: Context, framework: String) {
+    if (framework == "Vector" && openVectorScope(context)) return
+
     val candidates = frameworkCandidates(context, framework)
     if (candidates.isEmpty()) {
         Toast.makeText(
