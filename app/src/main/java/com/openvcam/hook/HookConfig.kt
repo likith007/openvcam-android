@@ -2,7 +2,6 @@ package com.openvcam.hook
 
 import android.content.Context
 import android.net.Uri
-import android.os.Bundle
 import android.os.SystemClock
 import org.json.JSONObject
 
@@ -19,38 +18,28 @@ object HookConfig {
     @Volatile
     private var lastFetch: Long = 0L
 
-    @Volatile
-    private var lastHeartbeat: Long = 0L
-
     fun snapshot(): JSONObject? {
-        val ctx = context ?: return cached
         val now = SystemClock.elapsedRealtime()
         if (cached != null && now - lastFetch < 300L) return cached
         lastFetch = now
-        try {
-            val bundle = ctx.contentResolver.call(ROOT_URI, "getConfig", null, null)
-            val json = bundle?.getString("json")
-            if (!json.isNullOrEmpty()) {
+
+        // The target app cannot resolve com.openvcam.provider because Android's
+        // package visibility rules hide providers it did not declare in its own
+        // manifest. HookBridge reads the same config through a root shell and
+        // intercepts the ContentResolver calls we make here.
+        val json = HookBridge.configJson()
+        if (!json.isNullOrEmpty()) {
+            try {
                 cached = JSONObject(json)
-            } else {
-                HookLog.once("config.empty", "empty config from provider in ${ctx.packageName}")
+                HookLog.once("config.ready", "config received from OpenVCam (${json.length} bytes)")
+            } catch (t: Throwable) {
+                HookLog.once("config.parse", "invalid config JSON: ${t.message}")
             }
-        } catch (t: Throwable) {
-            HookLog.once("config.fail", "config provider call failed in ${ctx.packageName}: ${t.message}")
+        } else {
+            HookLog.once("config.empty", "empty config from bridge")
         }
 
-        if (now - lastHeartbeat > 10_000L) {
-            lastHeartbeat = now
-            try {
-                ctx.contentResolver.call(
-                    ROOT_URI,
-                    "heartbeat",
-                    null,
-                    Bundle().apply { putString("package", ctx.packageName) }
-                )
-            } catch (_: Throwable) {
-            }
-        }
+        context?.packageName?.let { HookBridge.heartbeat(it) }
         return cached
     }
 

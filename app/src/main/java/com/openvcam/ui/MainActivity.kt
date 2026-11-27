@@ -13,6 +13,7 @@ import android.os.Looper
 import android.widget.Toast
 import android.widget.VideoView
 import androidx.activity.ComponentActivity
+import androidx.core.content.ContextCompat
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -335,6 +336,12 @@ private fun MinimalScreen() {
     fun refresh() { version++ }
     fun apply(action: String, value: Any? = null) {
         store.applyControl(action, value)
+        if (action == "toggleEnabled" && store.config.enabled) {
+            ContextCompat.startForegroundService(
+                context,
+                Intent(context, com.openvcam.core.CoreKeepAliveService::class.java)
+            )
+        }
         refresh()
     }
     fun edit(block: AppConfig.() -> Unit) {
@@ -352,6 +359,11 @@ private fun MinimalScreen() {
         if (initial.enabled && initial.activeSource.type == "none") {
             store.update { enabled = false }
             refresh()
+        } else if (initial.enabled) {
+            ContextCompat.startForegroundService(
+                context,
+                Intent(context, com.openvcam.core.CoreKeepAliveService::class.java)
+            )
         }
         root = withContext(Dispatchers.IO) { hasRoot() }
         framework = withContext(Dispatchers.IO) { detectFramework(context) }

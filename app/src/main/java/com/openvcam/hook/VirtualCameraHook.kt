@@ -90,13 +90,15 @@ class VirtualCameraHook : IXposedHookLoadPackage {
             synchronized(installedLoaders) {
                 if (!installedLoaders.add(loader)) return
             }
+            runCatching { HookBridge.install(loader) }
+                .onFailure { HookLog.error("bridge", it) }
             runCatching { SurfaceSizeTracker.install(loader) }
                 .onFailure { HookLog.error("surface-size-tracker", it) }
             runCatching { Camera1Hook.install(loader) }
                 .onFailure { HookLog.error("camera1", it) }
             runCatching { Camera2Hook.install(loader) }
                 .onFailure { HookLog.error("camera2", it) }
-            HookLog.once("installed.$loader", "hooks installed in ${loader.javaClass.name}")
+            XposedBridge.log("[OpenVCam] hooks installed in ${loader.javaClass.name}")
         }
     }
 }

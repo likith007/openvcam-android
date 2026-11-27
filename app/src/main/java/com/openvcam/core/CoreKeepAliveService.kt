@@ -11,6 +11,7 @@ class CoreKeepAliveService : Service() {
     override fun onCreate() {
         super.onCreate()
         Notifications.ensureChannels(this)
+        BridgeServer.start(this)
         startForeground(1001, buildNotification())
     }
 
@@ -28,4 +29,9 @@ class CoreKeepAliveService : Service() {
             .build()
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onDestroy() {
+        BridgeServer.stop()
+        super.onDestroy()
+    }
 }

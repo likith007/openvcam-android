@@ -5,6 +5,7 @@ import de.robv.android.xposed.XC_MethodHook.MethodHookParam
 import de.robv.android.xposed.XposedBridge
 import java.lang.reflect.Constructor
 import java.lang.reflect.Method
+import java.lang.reflect.Modifier
 
 object HookUtils {
 
@@ -64,6 +65,9 @@ object HookUtils {
         val seen = mutableSetOf<String>()
         declaredMethods(clazz).forEach { m ->
             if (m.name in names) {
+                // Vector cannot hook abstract framework methods; only concrete
+                // overrides have a body worth replacing.
+                if (Modifier.isAbstract(m.modifiers)) return@forEach
                 val key = m.name + m.parameterTypes.joinToString { it.name }
                 if (seen.add(key)) hook(m, callback, "$tag.${m.name}")
             }
